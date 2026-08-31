@@ -8,6 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 class CheckStatus(StrEnum):
     PENDING = "pending"
+    ENRICHED = "enriched"
+    ENRICHMENT_FAILED = "enrichment_failed"
     APOLLO_SUCCESS = "apollo_success"
     APOLLO_FAILED = "apollo_failed"
     SEARCHING = "searching"

@@ -48,6 +48,9 @@ class WorkflowDatabase:
                     company_name TEXT NOT NULL DEFAULT '',
                     company_domain TEXT NOT NULL DEFAULT '',
                     company_linkedin_url TEXT NOT NULL DEFAULT '',
+                    company_headquarters TEXT NOT NULL DEFAULT '',
+                    company_country TEXT NOT NULL DEFAULT '',
+                    company_country_code TEXT NOT NULL DEFAULT '',
                     resolution_status TEXT NOT NULL DEFAULT 'pending',
                     resolution_error TEXT NOT NULL DEFAULT '',
                     raw_input TEXT NOT NULL DEFAULT '{}'
@@ -79,6 +82,9 @@ class WorkflowDatabase:
             )
             self._ensure_column(conn, "people", "company_domain", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "people", "company_linkedin_url", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "people", "company_headquarters", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "people", "company_country", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "people", "company_country_code", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "company_checks", "screenshot_path", "TEXT NOT NULL DEFAULT ''")
 
     @staticmethod
@@ -130,14 +136,26 @@ class WorkflowDatabase:
 
     def update_person_resolution(
         self, person_id: int, *, company_name: str, status: str, error: str = "",
-        domain: str = "", company_linkedin_url: str = "",
+        domain: str = "", company_linkedin_url: str = "", headquarters: str = "",
+        country: str = "", country_code: str = "",
     ) -> None:
         with self.connect() as conn:
             conn.execute(
                 """UPDATE people SET company_name = ?, company_domain = ?, company_linkedin_url = ?,
+                company_headquarters = ?, company_country = ?, company_country_code = ?,
                 resolution_status = ?, resolution_error = ?
                 WHERE id = ?""",
-                (company_name, domain, company_linkedin_url, status, error, person_id),
+                (
+                    company_name,
+                    domain,
+                    company_linkedin_url,
+                    headquarters,
+                    country,
+                    country_code,
+                    status,
+                    error,
+                    person_id,
+                ),
             )
 
     def upsert_check(self, person_id: int, run_id: int, values: dict[str, str]) -> None:
@@ -191,6 +209,7 @@ class WorkflowDatabase:
             SELECT r.id AS run_id, r.status AS run_status, r.created_at,
                    p.id AS person_id, p.row_number, p.person_name, p.linkedin_url, p.headline,
                    p.company_name, p.resolution_status, p.resolution_error,
+                   p.company_headquarters, p.company_country, p.company_country_code,
                    c.servicenow_customer, c.servicenow_matched_name, c.match_score,
                    c.screenshot_path,
                    c.check_status, c.headquarters, c.country, c.country_code,

@@ -17,7 +17,13 @@ class Settings(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    apollo_api_key: str = Field(min_length=1)
+    openai_api_key: str = Field(min_length=1)
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_model: str = "gpt-5-mini"
+    openai_timeout_seconds: float = Field(default=45.0, gt=0)
+    openai_max_retries: int = Field(default=3, ge=1, le=8)
+    openai_search_context_size: str = "low"
+    apollo_api_key: str = ""
     apollo_base_url: str = "https://api.apollo.io/api/v1"
     chrome_cdp_url: str = "http://localhost:9222"
     servicenow_username: str | None = None
@@ -48,6 +54,8 @@ class Settings(BaseModel):
     def validate_thresholds(self) -> "Settings":
         if self.review_threshold >= self.match_threshold:
             raise ValueError("REVIEW_THRESHOLD must be lower than MATCH_THRESHOLD")
+        if self.openai_search_context_size not in {"low", "medium", "high"}:
+            raise ValueError("OPENAI_SEARCH_CONTEXT_SIZE must be low, medium, or high")
         return self
 
 
@@ -94,6 +102,12 @@ def load_settings(env_file: Path | None = None) -> Settings:
         return str(value).strip() if value is not None else os.getenv(name, default).strip()
 
     data: dict[str, Any] = {
+        "openai_api_key": os.getenv("OPENAI_API_KEY", "").strip(),
+        "openai_base_url": os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip(),
+        "openai_model": os.getenv("OPENAI_MODEL", "gpt-5-mini").strip(),
+        "openai_timeout_seconds": os.getenv("OPENAI_TIMEOUT_SECONDS", "45"),
+        "openai_max_retries": os.getenv("OPENAI_MAX_RETRIES", "3"),
+        "openai_search_context_size": os.getenv("OPENAI_SEARCH_CONTEXT_SIZE", "low").strip(),
         "apollo_api_key": os.getenv("APOLLO_API_KEY", "").strip(),
         "apollo_base_url": os.getenv("APOLLO_BASE_URL", "https://api.apollo.io/api/v1").strip(),
         "chrome_cdp_url": os.getenv("CHROME_CDP_URL", "http://localhost:9222").strip(),

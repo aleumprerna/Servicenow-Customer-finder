@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from browser.connection import FormNotFoundError, connect_to_servicenow
 from browser.servicenow import SearchTechnicalError, ServiceNowChecker, SessionExpiredError, safe_filename
-from clients.apollo import ApolloClient, ApolloError
+from clients.openai_websearch import OpenAIResearchError, OpenAIWebSearchClient
 from config import Settings, load_settings
 from models.company import CheckStatus, CompanyRecord
 from services.country_normalizer import CountryNormalizationError, country_name, normalize_country
@@ -43,24 +43,25 @@ def clean_error(exc: BaseException) -> str:
     return " ".join(str(exc).split())[:1000]
 
 
-def build_apollo_client(settings: Settings) -> ApolloClient:
-    return ApolloClient(
-        api_key=settings.apollo_api_key,
-        base_url=settings.apollo_base_url,
-        timeout_seconds=settings.apollo_timeout_seconds,
-        max_retries=settings.apollo_max_retries,
-        match_threshold=settings.apollo_match_threshold,
+def build_research_client(settings: Settings) -> OpenAIWebSearchClient:
+    return OpenAIWebSearchClient(
+        api_key=settings.openai_api_key,
+        base_url=settings.openai_base_url,
+        model=settings.openai_model,
+        timeout_seconds=settings.openai_timeout_seconds,
+        max_retries=settings.openai_max_retries,
+        search_context_size=settings.openai_search_context_size,
     )
 
 
 async def enrich_or_override(
-    record: CompanyRecord, apollo: ApolloClient
+    record: CompanyRecord, research: OpenAIWebSearchClient
 ) -> tuple[str, str, str, str]:
-    """Return headquarters, country name, country code, and Apollo organization name."""
+    """Return headquarters, country name, country code, and researched organization name."""
 
-    if record.country_override.strip():
+    if record.country_override.strip() or record.country_code.strip():
         try:
-            code = normalize_country(record.country_override)
+            code = normalize_country(record.country_override or record.country_code)
             LOGGER.info("Using country_override: %s - %s", code, country_name(code))
             return (
                 record.headquarters or country_name(code),
@@ -69,12 +70,15 @@ async def enrich_or_override(
                 record.apollo_company_name,
             )
         except CountryNormalizationError:
-            LOGGER.warning("Ignoring invalid country_override and falling back to Apollo")
+            LOGGER.warning("Ignoring invalid country/country_override and falling back to OpenAI web search")
 
     company = await asyncio.to_thread(
-        apollo.enrich, record.company_name, record.linkedin_url, record.domain
+        research.company_details,
+        company_name=record.company_name,
+        linkedin_url=record.linkedin_url,
+        domain=record.domain,
     )
-    LOGGER.info("Apollo: %s", company.company_name)
+    LOGGER.info("OpenAI web search: %s", company.company_name)
     LOGGER.info("Headquarters: %s", company.headquarters)
     LOGGER.info("Country: %s", company.country_code)
     return (
@@ -97,7 +101,7 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
         LOGGER.info("No pending companies to process. Use --force to recheck completed rows.")
         return 0
 
-    apollo = build_apollo_client(settings)
+    research = build_research_client(settings)
     LOGGER.info("Preparing to process %d company row(s)", len(indices))
 
     async with async_playwright() as playwright:
@@ -149,33 +153,33 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
                 return 4
 
             try:
-                headquarters, country, country_code, apollo_name = await enrich_or_override(
-                    record, apollo
+                headquarters, country, country_code, researched_name = await enrich_or_override(
+                    record, research
                 )
                 csv_service.update(
                     index,
                     headquarters=headquarters,
                     country=country,
                     country_code=country_code,
-                    apollo_company_name=apollo_name,
+                    apollo_company_name=researched_name,
                     servicenow_customer="",
                     servicenow_matched_name="",
                     match_score="",
-                    check_status=CheckStatus.APOLLO_SUCCESS,
+                    check_status=CheckStatus.ENRICHED,
                     error_message="",
                     checked_at="",
                 )
                 csv_service.save()
-            except (ApolloError, CountryNormalizationError) as exc:
+            except (OpenAIResearchError, CountryNormalizationError) as exc:
                 csv_service.update(
                     index,
                     servicenow_customer="Unknown",
-                    check_status=CheckStatus.APOLLO_FAILED,
+                    check_status=CheckStatus.ENRICHMENT_FAILED,
                     error_message=clean_error(exc),
                     checked_at=record.checked_now(),
                 )
                 csv_service.save()
-                LOGGER.error("Apollo enrichment failed: %s", clean_error(exc))
+                LOGGER.error("OpenAI web search enrichment failed: %s", clean_error(exc))
                 LOGGER.info("CSV updated.")
                 if position < len(indices):
                     await asyncio.sleep(settings.delay_between_companies_seconds)
@@ -184,12 +188,12 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
                 csv_service.update(
                     index,
                     servicenow_customer="Unknown",
-                    check_status=CheckStatus.APOLLO_FAILED,
+                    check_status=CheckStatus.ENRICHMENT_FAILED,
                     error_message=clean_error(exc),
                     checked_at=record.checked_now(),
                 )
                 csv_service.save()
-                LOGGER.exception("Unexpected Apollo enrichment failure")
+                LOGGER.exception("Unexpected OpenAI web search enrichment failure")
                 if position < len(indices):
                     await asyncio.sleep(settings.delay_between_companies_seconds)
                 continue

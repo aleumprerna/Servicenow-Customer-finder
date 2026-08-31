@@ -13,7 +13,7 @@ from typing import Any
 
 import requests
 
-from clients.apollo import ApolloClient
+from clients.openai_websearch import OpenAIWebSearchClient
 from config import PROJECT_ROOT, Settings, load_settings
 from workflow.database import WorkflowDatabase, now
 from workflow.person_company import PersonCompanyResolver
@@ -21,8 +21,7 @@ from workflow.person_company import PersonCompanyResolver
 
 RUNS_DIR = PROJECT_ROOT / "data" / "runs"
 TRUSTED_COMPANY_STATUSES = {
-    "apollo_verified",
-    "apollo_cross_verified",
+    "openai_verified",
     "linkedin_headline_verified",
     "manual_verified",
 }
@@ -78,22 +77,23 @@ def parse_people_csv(raw: bytes) -> list[dict[str, Any]]:
     return people
 
 
-def _apollo(settings: Settings) -> ApolloClient:
-    return ApolloClient(
-        api_key=settings.apollo_api_key,
-        base_url=settings.apollo_base_url,
-        timeout_seconds=settings.apollo_timeout_seconds,
-        max_retries=settings.apollo_max_retries,
-        match_threshold=settings.apollo_match_threshold,
+def _research(settings: Settings) -> OpenAIWebSearchClient:
+    return OpenAIWebSearchClient(
+        api_key=settings.openai_api_key,
+        base_url=settings.openai_base_url,
+        model=settings.openai_model,
+        timeout_seconds=settings.openai_timeout_seconds,
+        max_retries=settings.openai_max_retries,
+        search_context_size=settings.openai_search_context_size,
     )
 
 
 def resolve_people(database: WorkflowDatabase, run_id: int, settings: Settings) -> list[dict[str, Any]]:
-    resolver = PersonCompanyResolver(_apollo(settings))
+    resolver = PersonCompanyResolver(_research(settings))
     people = database.people_for_run(run_id)
     for person in people:
-        # Older runs stored headline guesses without organization identifiers.
-        # Refresh those, and any unresolved row, through Apollo People Match.
+        # Older runs may contain Apollo or headline-only guesses. Refresh any
+        # untrusted row through OpenAI web search.
         if person["resolution_status"] in TRUSTED_COMPANY_STATUSES:
             continue
         result = resolver.resolve(
@@ -105,6 +105,7 @@ def resolve_people(database: WorkflowDatabase, run_id: int, settings: Settings) 
         database.update_person_resolution(
             person["id"], company_name=result.company_name, status=result.status, error=result.error,
             domain=result.domain, company_linkedin_url=result.company_linkedin_url,
+            headquarters=result.headquarters, country=result.country, country_code=result.country_code,
         )
     return database.people_for_run(run_id)
 
@@ -126,14 +127,16 @@ def build_pipeline_csv(database: WorkflowDatabase, run_id: int, settings: Settin
     output_path.unlink(missing_ok=True)
     fields = [
         "company_name", "linkedin_url", "source_person_id", "person_name",
-        "source_person_linkedin_url", "headline", "domain",
+        "source_person_linkedin_url", "headline", "domain", "headquarters",
+        "country", "country_code", "country_override",
     ]
     with input_path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=fields)
         writer.writeheader()
         for person in resolved:
             # The personal profile is retained separately. Apollo's organization
-            # identifiers are the only values passed to organization enrichment.
+            # identifiers, when available, are the only LinkedIn values passed
+            # to organization enrichment.
             writer.writerow(
                 {
                     "company_name": person["company_name"],
@@ -143,6 +146,10 @@ def build_pipeline_csv(database: WorkflowDatabase, run_id: int, settings: Settin
                     "source_person_linkedin_url": person["linkedin_url"],
                     "headline": person["headline"],
                     "domain": person["company_domain"],
+                    "headquarters": person.get("company_headquarters", ""),
+                    "country": person.get("company_country", ""),
+                    "country_code": person.get("company_country_code", ""),
+                    "country_override": person.get("company_country_code", ""),
                 }
             )
     return input_path, output_path, len(resolved)

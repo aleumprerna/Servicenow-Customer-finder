@@ -122,8 +122,7 @@ def _company_cell(row: dict[str, Any]) -> str:
     if error:
         parts.append(f'<br><small class="resolution-error">{error}</small>')
     if str(row.get("resolution_status") or "") not in {
-        "apollo_verified",
-        "apollo_cross_verified",
+        "openai_verified",
         "linkedin_headline_verified",
         "manual_verified",
     }:
@@ -210,7 +209,7 @@ def _page(request: Request, selected_run: int | None = None) -> str:
       <p class="muted">Upload people → log into ServiceNow → collect customer checks → send verified “No” results to n8n.</p>
       {_message(request)}
       <section><h2>Upload people CSV</h2>
-        <p class="muted">Required headings: person name and LinkedIn URL. Your existing <code>Name</code> and <code>Profile URL</code> export works. Apollo resolves the current employer from the LinkedIn profile; headline text is stored only as report context.</p>
+        <p class="muted">Required headings: person name and LinkedIn URL. Your existing <code>Name</code> and <code>Profile URL</code> export works. OpenAI web search resolves the current employer and headquarters; headline text is only a hint.</p>
         <form method="post" action="/runs" enctype="multipart/form-data"><input type="file" name="file" accept=".csv,text/csv" required><button class="primary">Upload CSV</button></form>
       </section>
       <section><h2>Current run</h2>

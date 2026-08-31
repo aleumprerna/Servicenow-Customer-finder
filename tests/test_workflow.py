@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from clients.apollo import PersonOrganization
+from clients.openai_websearch import CompanyResearch, OpenAIResearchNoMatchError
 from workflow.database import WorkflowDatabase
 from workflow.person_company import PersonCompanyResolver
 from workflow.service import build_pipeline_csv, parse_people_csv, sync_pipeline_results
@@ -26,37 +26,42 @@ def test_uploaded_linkedin_export_is_normalized() -> None:
     ]
 
 
-class FakeApollo:
-    def person_company(self, linkedin_url: str, person_name: str) -> PersonOrganization:
+class FakeResearch:
+    def person_company(
+        self, *, person_name: str, linkedin_url: str, headline: str, supplied_company_name: str
+    ) -> CompanyResearch:
         assert linkedin_url == "https://linkedin.com/in/ada"
         assert person_name == "Ada"
-        return PersonOrganization(
-            name="Apollo Organization", domain="apollo.io",
-            linkedin_url="https://linkedin.com/company/apolloio",
+        return CompanyResearch(
+            company_name="OpenAI Organization",
+            country="United States",
+            country_code="US",
+            headquarters="San Francisco, California, United States",
+            domain="openai.com",
+            linkedin_url="https://linkedin.com/company/openai",
+            confidence="high",
+            evidence="Verified from web sources.",
         )
 
 
-class ChangedProfileApollo:
-    def person_company(self, linkedin_url: str, person_name: str) -> PersonOrganization:
-        return PersonOrganization(
-            name="Tech Mahindra",
-            domain="techmahindra.com",
-            person_name="Prakhar Singh",
-            person_linkedin_url="https://linkedin.com/in/prakhar-singh",
-            profile_matched=False,
-        )
+class NoMatchResearch:
+    def person_company(
+        self, *, person_name: str, linkedin_url: str, headline: str, supplied_company_name: str
+    ) -> CompanyResearch:
+        raise OpenAIResearchNoMatchError("No current employer could be verified")
 
 
-def test_company_resolver_uses_verified_apollo_person_profile() -> None:
-    resolver = PersonCompanyResolver(FakeApollo())  # type: ignore[arg-type]
+def test_company_resolver_uses_verified_openai_web_search_result() -> None:
+    resolver = PersonCompanyResolver(FakeResearch())  # type: ignore[arg-type]
     result = resolver.resolve(
         person_name="Ada", linkedin_url="https://linkedin.com/in/ada",
-        supplied_company_name="Provided Ltd", headline="Engineer at Apollo Organization",
+        supplied_company_name="Provided Ltd", headline="Engineer at OpenAI Organization",
     )
-    assert result.company_name == "Apollo Organization"
-    assert result.status == "apollo_verified"
-    assert result.domain == "apollo.io"
-    assert result.company_linkedin_url == "https://linkedin.com/company/apolloio"
+    assert result.company_name == "OpenAI Organization"
+    assert result.status == "openai_verified"
+    assert result.domain == "openai.com"
+    assert result.company_linkedin_url == "https://linkedin.com/company/openai"
+    assert result.country_code == "US"
 
 
 def test_pipeline_csv_sync_and_negative_filter(tmp_path: Path) -> None:
@@ -112,8 +117,9 @@ def test_build_pipeline_csv_replaces_stale_checkpoint(
     )
     person = database.people_for_run(run_id)[0]
     database.update_person_resolution(
-        person["id"], company_name="Example Corp", status="apollo_verified",
+        person["id"], company_name="Example Corp", status="openai_verified",
         domain="example.com", company_linkedin_url="https://linkedin.com/company/example",
+        headquarters="London, England, United Kingdom", country="United Kingdom", country_code="GB",
     )
     monkeypatch.setattr("workflow.service.RUNS_DIR", tmp_path / "runs")
     monkeypatch.setattr(
@@ -128,38 +134,38 @@ def test_build_pipeline_csv_replaces_stale_checkpoint(
     generated = input_path.read_text(encoding="utf-8")
     assert "example.com" in generated
     assert "linkedin.com/company/example" in generated
+    assert "London, England, United Kingdom" in generated
+    assert "GB" in generated
 
 
-def test_explicit_headline_employer_wins_over_stale_apollo_company() -> None:
-    resolver = PersonCompanyResolver(FakeApollo())  # type: ignore[arg-type]
+def test_verified_openai_result_can_disagree_with_headline_hint() -> None:
+    resolver = PersonCompanyResolver(FakeResearch())  # type: ignore[arg-type]
     result = resolver.resolve(
         person_name="Ada", linkedin_url="https://linkedin.com/in/ada",
         supplied_company_name="", headline="Engineer at Completely Different Ltd",
     )
-    assert result.status == "linkedin_headline_verified"
-    assert result.company_name == "Completely Different Ltd"
-    assert "conflicting" in result.error
+    assert result.status == "openai_verified"
+    assert result.company_name == "OpenAI Organization"
+    assert "headline mentioned" in result.error
 
 
-def test_changed_profile_is_cross_verified_by_name_and_headline() -> None:
-    resolver = PersonCompanyResolver(ChangedProfileApollo())  # type: ignore[arg-type]
+def test_headline_is_fallback_when_openai_cannot_verify_company() -> None:
+    resolver = PersonCompanyResolver(NoMatchResearch())  # type: ignore[arg-type]
     result = resolver.resolve(
-        person_name="Prakhar S.",
-        linkedin_url="https://linkedin.com/in/prakhar-s-old",
-        supplied_company_name="",
-        headline="Software Engineer@ Tech Mahindra|Python",
+        person_name="Ada", linkedin_url="https://linkedin.com/in/ada",
+        supplied_company_name="", headline="Engineer @ Tech Mahindra | Python",
     )
-    assert result.status == "apollo_cross_verified"
     assert result.company_name == "Tech Mahindra"
+    assert result.status == "linkedin_headline_verified"
 
 
-def test_changed_profile_without_two_confirmations_is_blocked() -> None:
-    resolver = PersonCompanyResolver(ChangedProfileApollo())  # type: ignore[arg-type]
+def test_no_verified_company_without_headline_is_unresolved() -> None:
+    resolver = PersonCompanyResolver(NoMatchResearch())  # type: ignore[arg-type]
     result = resolver.resolve(
         person_name="Different Person",
         linkedin_url="https://linkedin.com/in/different-person",
         supplied_company_name="",
         headline="",
     )
-    assert result.status == "apollo_profile_conflict"
+    assert result.status == "unresolved"
     assert result.company_name == ""
