@@ -6,7 +6,12 @@ from typing import Any
 import pytest
 import requests
 
-from clients.apollo import ApolloClient, ApolloNoMatchError, normalize_url
+from clients.apollo import (
+    ApolloClient,
+    ApolloNoMatchError,
+    linkedin_profile_matches,
+    normalize_url,
+)
 
 
 class FakeSession:
@@ -43,6 +48,14 @@ def client(session: FakeSession, retries: int = 3) -> ApolloClient:
 def test_linkedin_url_normalization() -> None:
     assert normalize_url("http://www.linkedin.com/company/Microsoft/?trk=test") == (
         "https://linkedin.com/company/microsoft"
+    )
+    assert normalize_url("https://in.linkedin.com/in/Ada/") == "https://linkedin.com/in/ada"
+    assert normalize_url("https://de.linkedin.com/in/Annett-Hufe/en") == (
+        "https://linkedin.com/in/annett-hufe"
+    )
+    assert linkedin_profile_matches(
+        "https://linkedin.com/in/prakhar-s-42bbb310a",
+        "https://linkedin.com/in/prakhar-singh-42bbb310a",
     )
 
 
@@ -124,8 +137,10 @@ def test_person_company_uses_person_linkedin_url_and_returns_organization_identi
         [
             response(
                 200,
-                {"person": {"organization": {"name": "Adobe", "primary_domain": "adobe.com",
-                "linkedin_url": "https://www.linkedin.com/company/adobe/"}}},
+                {"person": {
+                    "linkedin_url": "https://www.linkedin.com/in/ada-lovelace",
+                    "organization": {"name": "Adobe", "primary_domain": "adobe.com",
+                    "linkedin_url": "https://www.linkedin.com/company/adobe/"}}},
             )
         ]
     )
@@ -134,6 +149,56 @@ def test_person_company_uses_person_linkedin_url_and_returns_organization_identi
     assert result.domain == "adobe.com"
     assert result.linkedin_url == "https://linkedin.com/company/adobe"
     assert session.calls[0][2]["params"]["linkedin_url"] == "https://linkedin.com/in/ada-lovelace"
+
+
+def test_person_company_marks_a_different_profile_as_unverified() -> None:
+    session = FakeSession(
+        [response(200, {"person": {
+            "linkedin_url": "https://linkedin.com/in/someone-else",
+            "organization": {"name": "Wrong Company"},
+        }})]
+    )
+    result = client(session).person_company("https://linkedin.com/in/ada-lovelace", "Ada")
+    assert result.name == "Wrong Company"
+    assert result.profile_matched is False
+
+
+def test_person_company_uses_single_current_employment_when_primary_is_missing() -> None:
+    session = FakeSession(
+        [response(200, {"person": {
+            "linkedin_url": "https://linkedin.com/in/ada-lovelace",
+            "employment_history": [{
+                "current": True,
+                "organization_id": "org-1",
+                "organization_name": "Current Company",
+            }],
+        }})]
+    )
+    result = client(session).person_company("https://linkedin.com/in/ada-lovelace", "Ada")
+    assert result.name == "Current Company"
+
+
+def test_person_company_fetches_complete_record_when_match_is_partial() -> None:
+    session = FakeSession(
+        [
+            response(200, {"person": {
+                "id": "person-1",
+                "name": "Ada Lovelace",
+                "linkedin_url": "https://linkedin.com/in/ada-lovelace",
+            }}),
+            response(200, {"person": {
+                "id": "person-1",
+                "name": "Ada Lovelace",
+                "linkedin_url": "https://linkedin.com/in/ada-lovelace",
+                "organization": {"name": "Complete Company", "primary_domain": "complete.test"},
+            }}),
+        ]
+    )
+    result = client(session).person_company("https://linkedin.com/in/ada-lovelace", "Ada Lovelace")
+    assert result.name == "Complete Company"
+    assert result.domain == "complete.test"
+    assert session.calls[1][0] == "GET"
+    assert session.calls[1][1].endswith("/people/person-1")
 
 
 def test_unrelated_organizations_are_rejected() -> None:

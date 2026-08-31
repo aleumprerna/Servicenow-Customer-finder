@@ -10,7 +10,7 @@ from playwright.async_api import Error as PlaywrightError, async_playwright
 from pydantic import ValidationError
 
 from browser.connection import FormNotFoundError, connect_to_servicenow
-from browser.servicenow import SearchTechnicalError, ServiceNowChecker, SessionExpiredError
+from browser.servicenow import SearchTechnicalError, ServiceNowChecker, SessionExpiredError, safe_filename
 from clients.apollo import ApolloClient, ApolloError
 from config import Settings, load_settings
 from models.company import CheckStatus, CompanyRecord
@@ -201,10 +201,18 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
 
             try:
                 result = await checker.search_with_retry(record.company_name, country_code)
+                screenshot_path = ""
+                if result.customer.casefold() == "yes" and settings.save_screenshots:
+                    screenshot_path = str(
+                        settings.debug_dir
+                        / "screenshots"
+                        / f"{safe_filename(record.company_name)}_results.png"
+                    )
                 csv_service.update(
                     index,
                     servicenow_customer=result.customer,
                     servicenow_matched_name=result.matched_name,
+                    servicenow_screenshot=screenshot_path,
                     match_score=result.match_score if result.matched_name else "",
                     check_status=result.status,
                     error_message=result.error_message,

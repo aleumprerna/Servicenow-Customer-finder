@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
@@ -82,7 +82,17 @@ def _parse_result_selectors() -> tuple[str, ...]:
 
 
 def load_settings(env_file: Path | None = None) -> Settings:
-    load_dotenv(dotenv_path=env_file or PROJECT_ROOT / ".env")
+    dotenv_path = env_file or PROJECT_ROOT / ".env"
+    load_dotenv(dotenv_path=dotenv_path)
+    file_values = dotenv_values(dotenv_path)
+
+    def dynamic_value(name: str, default: str = "") -> str:
+        # The UI can stay running while the user updates webhook settings. Read
+        # these values from disk every time instead of retaining an earlier blank
+        # value in the long-lived server process.
+        value = file_values.get(name)
+        return str(value).strip() if value is not None else os.getenv(name, default).strip()
+
     data: dict[str, Any] = {
         "apollo_api_key": os.getenv("APOLLO_API_KEY", "").strip(),
         "apollo_base_url": os.getenv("APOLLO_BASE_URL", "https://api.apollo.io/api/v1").strip(),
@@ -97,12 +107,12 @@ def load_settings(env_file: Path | None = None) -> Settings:
         "match_threshold": os.getenv("MATCH_THRESHOLD", "85"),
         "review_threshold": os.getenv("REVIEW_THRESHOLD", "70"),
         "apollo_match_threshold": os.getenv("APOLLO_MATCH_THRESHOLD", "80"),
-        "save_screenshots": _parse_bool("SAVE_SCREENSHOTS", False),
+        "save_screenshots": _parse_bool("SAVE_SCREENSHOTS", True),
         "debug_dir": os.getenv("DEBUG_DIR", "debug"),
         "apollo_timeout_seconds": os.getenv("APOLLO_TIMEOUT_SECONDS", "20"),
         "apollo_max_retries": os.getenv("APOLLO_MAX_RETRIES", "3"),
         "result_selectors": _parse_result_selectors(),
-        "n8n_webhook_url": _optional("N8N_WEBHOOK_URL"),
-        "app_base_url": os.getenv("APP_BASE_URL", "http://localhost:8000").strip(),
+        "n8n_webhook_url": dynamic_value("N8N_WEBHOOK_URL") or None,
+        "app_base_url": dynamic_value("APP_BASE_URL", "http://localhost:8000"),
     }
     return Settings.model_validate(data)

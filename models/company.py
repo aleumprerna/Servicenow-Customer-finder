@@ -54,6 +54,7 @@ class CompanyRecord(BaseModel):
     apollo_company_name: str = ""
     servicenow_customer: str = ""
     servicenow_matched_name: str = ""
+    servicenow_screenshot: str = ""
     match_score: int | None = None
     check_status: CheckStatus = CheckStatus.PENDING
     error_message: str = ""

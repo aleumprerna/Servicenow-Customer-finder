@@ -3,7 +3,7 @@ from pathlib import Path
 from clients.apollo import PersonOrganization
 from workflow.database import WorkflowDatabase
 from workflow.person_company import PersonCompanyResolver
-from workflow.service import parse_people_csv, sync_pipeline_results
+from workflow.service import build_pipeline_csv, parse_people_csv, sync_pipeline_results
 
 
 def test_uploaded_linkedin_export_is_normalized() -> None:
@@ -36,13 +36,25 @@ class FakeApollo:
         )
 
 
-def test_company_resolver_uses_apollo_person_profile_not_headline() -> None:
+class ChangedProfileApollo:
+    def person_company(self, linkedin_url: str, person_name: str) -> PersonOrganization:
+        return PersonOrganization(
+            name="Tech Mahindra",
+            domain="techmahindra.com",
+            person_name="Prakhar Singh",
+            person_linkedin_url="https://linkedin.com/in/prakhar-singh",
+            profile_matched=False,
+        )
+
+
+def test_company_resolver_uses_verified_apollo_person_profile() -> None:
     resolver = PersonCompanyResolver(FakeApollo())  # type: ignore[arg-type]
     result = resolver.resolve(
         person_name="Ada", linkedin_url="https://linkedin.com/in/ada",
-        supplied_company_name="Provided Ltd", headline="Engineer at Example Corp",
+        supplied_company_name="Provided Ltd", headline="Engineer at Apollo Organization",
     )
     assert result.company_name == "Apollo Organization"
+    assert result.status == "apollo_verified"
     assert result.domain == "apollo.io"
     assert result.company_linkedin_url == "https://linkedin.com/company/apolloio"
 
@@ -56,14 +68,23 @@ def test_pipeline_csv_sync_and_negative_filter(tmp_path: Path) -> None:
     person = database.people_for_run(run_id)[0]
     output = tmp_path / "checked.csv"
     output.write_text(
-        "source_person_id,company_name,servicenow_customer,check_status,country\n"
-        f"{person['id']},Example Corp,No,completed,United Kingdom\n",
+        "source_person_id,company_name,servicenow_customer,servicenow_screenshot,check_status,country\n"
+        f"{person['id']},Example Corp,No,C:/screenshots/example.png,completed,United Kingdom\n",
         encoding="utf-8",
     )
     assert sync_pipeline_results(database, run_id, output) == 1
     negative = database.unsent_negative_checks(run_id)
     assert len(negative) == 1
     assert negative[0]["company_name"] == "Example Corp"
+    assert database.report_rows(run_id)[0]["screenshot_path"] == "C:/screenshots/example.png"
+    database.set_n8n_result(
+        person["id"], status="not_configured", response="Webhook missing"
+    )
+    assert len(database.unsent_negative_checks(run_id)) == 1
+    database.set_n8n_result(person["id"], status="failed", response="HTTP 500")
+    assert len(database.unsent_negative_checks(run_id)) == 1
+    database.set_n8n_result(person["id"], status="sent", response="ok", sent=True)
+    assert database.unsent_negative_checks(run_id) == []
 
 
 def test_clear_database_removes_reports_but_keeps_schema(tmp_path: Path) -> None:
@@ -79,3 +100,66 @@ def test_clear_database_removes_reports_but_keeps_schema(tmp_path: Path) -> None
         "next.csv", [{"person_name": "Grace", "linkedin_url": "https://linkedin.com/in/grace"}]
     )
     assert database.run(new_run_id)["source_file"] == "next.csv"
+
+
+def test_build_pipeline_csv_replaces_stale_checkpoint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = WorkflowDatabase(tmp_path / "workflow.db")
+    database.initialize()
+    run_id = database.create_run(
+        "people.csv", [{"person_name": "Ada", "linkedin_url": "https://linkedin.com/in/ada"}]
+    )
+    person = database.people_for_run(run_id)[0]
+    database.update_person_resolution(
+        person["id"], company_name="Example Corp", status="apollo_verified",
+        domain="example.com", company_linkedin_url="https://linkedin.com/company/example",
+    )
+    monkeypatch.setattr("workflow.service.RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(
+        "workflow.service.resolve_people", lambda _database, _run_id, _settings: database.people_for_run(run_id)
+    )
+    stale_output = tmp_path / "runs" / str(run_id) / "companies_checked.csv"
+    stale_output.parent.mkdir(parents=True)
+    stale_output.write_text("stale", encoding="utf-8")
+    input_path, output_path, count = build_pipeline_csv(database, run_id, object())  # type: ignore[arg-type]
+    assert count == 1
+    assert not output_path.exists()
+    generated = input_path.read_text(encoding="utf-8")
+    assert "example.com" in generated
+    assert "linkedin.com/company/example" in generated
+
+
+def test_explicit_headline_employer_wins_over_stale_apollo_company() -> None:
+    resolver = PersonCompanyResolver(FakeApollo())  # type: ignore[arg-type]
+    result = resolver.resolve(
+        person_name="Ada", linkedin_url="https://linkedin.com/in/ada",
+        supplied_company_name="", headline="Engineer at Completely Different Ltd",
+    )
+    assert result.status == "linkedin_headline_verified"
+    assert result.company_name == "Completely Different Ltd"
+    assert "conflicting" in result.error
+
+
+def test_changed_profile_is_cross_verified_by_name_and_headline() -> None:
+    resolver = PersonCompanyResolver(ChangedProfileApollo())  # type: ignore[arg-type]
+    result = resolver.resolve(
+        person_name="Prakhar S.",
+        linkedin_url="https://linkedin.com/in/prakhar-s-old",
+        supplied_company_name="",
+        headline="Software Engineer@ Tech Mahindra|Python",
+    )
+    assert result.status == "apollo_cross_verified"
+    assert result.company_name == "Tech Mahindra"
+
+
+def test_changed_profile_without_two_confirmations_is_blocked() -> None:
+    resolver = PersonCompanyResolver(ChangedProfileApollo())  # type: ignore[arg-type]
+    result = resolver.resolve(
+        person_name="Different Person",
+        linkedin_url="https://linkedin.com/in/different-person",
+        supplied_company_name="",
+        headline="",
+    )
+    assert result.status == "apollo_profile_conflict"
+    assert result.company_name == ""

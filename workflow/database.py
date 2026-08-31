@@ -59,6 +59,7 @@ class WorkflowDatabase:
                     company_name TEXT NOT NULL,
                     servicenow_customer TEXT NOT NULL DEFAULT '',
                     servicenow_matched_name TEXT NOT NULL DEFAULT '',
+                    screenshot_path TEXT NOT NULL DEFAULT '',
                     match_score TEXT NOT NULL DEFAULT '',
                     check_status TEXT NOT NULL DEFAULT '',
                     headquarters TEXT NOT NULL DEFAULT '',
@@ -78,6 +79,7 @@ class WorkflowDatabase:
             )
             self._ensure_column(conn, "people", "company_domain", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "people", "company_linkedin_url", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "company_checks", "screenshot_path", "TEXT NOT NULL DEFAULT ''")
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -155,7 +157,8 @@ class WorkflowDatabase:
                 """SELECT c.*, p.person_name, p.linkedin_url, p.headline
                 FROM company_checks c JOIN people p ON p.id = c.person_id
                 WHERE c.run_id = ? AND lower(c.servicenow_customer) = 'no'
-                    AND c.check_status = 'completed' AND c.n8n_status = 'not_sent'
+                    AND c.check_status = 'completed'
+                    AND c.n8n_status IN ('not_sent', 'not_configured', 'failed')
                 ORDER BY c.id""",
                 (run_id,),
             ).fetchall()
@@ -176,12 +179,20 @@ class WorkflowDatabase:
                 (*values.values(), person_id),
             )
 
+    def mark_n8n_for_retry(self, person_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE company_checks SET n8n_status = 'failed' WHERE person_id = ?",
+                (person_id,),
+            )
+
     def report_rows(self, run_id: int | None = None) -> list[dict[str, Any]]:
         query = """
             SELECT r.id AS run_id, r.status AS run_status, r.created_at,
                    p.id AS person_id, p.row_number, p.person_name, p.linkedin_url, p.headline,
                    p.company_name, p.resolution_status, p.resolution_error,
                    c.servicenow_customer, c.servicenow_matched_name, c.match_score,
+                   c.screenshot_path,
                    c.check_status, c.headquarters, c.country, c.country_code,
                    c.apollo_company_name, c.error_message, c.checked_at,
                    c.n8n_status, c.n8n_response, c.n8n_sent_at, c.n8n_received_at

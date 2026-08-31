@@ -8,16 +8,27 @@ import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 
-from config import PROJECT_ROOT
+from browser.servicenow import safe_filename
+from config import PROJECT_ROOT, load_settings
 from workflow.database import WorkflowDatabase
-from workflow.service import launch_chrome, parse_people_csv, run_collection
+from workflow.presentation import parse_n8n_evidence
+from workflow.service import (
+    launch_chrome,
+    parse_people_csv,
+    run_collection,
+    send_negatives_to_n8n,
+)
 
 
 DATABASE = WorkflowDatabase(PROJECT_ROOT / "data" / "workflow.db")
 app = FastAPI(title="ServiceNow Partner Workflow", docs_url=None, redoc_url=None)
+
+
+class _SafeHtml(str):
+    """HTML generated only by trusted dashboard rendering helpers."""
 
 
 @app.on_event("startup")
@@ -26,6 +37,8 @@ def initialize_database() -> None:
 
 
 def _escape(value: Any) -> str:
+    if isinstance(value, _SafeHtml):
+        return str(value)
     return html.escape(str(value or ""))
 
 
@@ -35,12 +48,114 @@ def _message(request: Request) -> str:
     return f'<p class="message {kind}">{_escape(message)}</p>' if message else ""
 
 
+def _n8n_cell(row: dict[str, Any]) -> str:
+    evidence = parse_n8n_evidence(
+        str(row.get("n8n_status") or ""), str(row.get("n8n_response") or "")
+    )
+    parts = [
+        f'<span class="badge">Delivery: {_escape(evidence.delivery_status or "Waiting")}</span>'
+    ]
+    if evidence.servicenow_status:
+        parts.append(
+            f'<div class="evidence-status">ServiceNow usage: '
+            f'{_escape(evidence.servicenow_status)}</div>'
+        )
+    if evidence.source_type:
+        parts.append(f'<span class="badge source">Source: {_escape(evidence.source_type)}</span>')
+    if evidence.verification_status:
+        parts.append(f'<div class="verification">{_escape(evidence.verification_status)}</div>')
+    if evidence.evidence_strength:
+        parts.append(f'<small>Evidence: {_escape(evidence.evidence_strength)}</small>')
+    if evidence.evidence_note:
+        parts.append(f'<div class="evidence-note">{_escape(evidence.evidence_note)}</div>')
+    if evidence.citations:
+        links: list[str] = []
+        for citation in evidence.citations:
+            label = f"{citation.citation_type}: {citation.title}"
+            if citation.url:
+                links.append(
+                    f'<li><a href="{_escape(citation.url)}" target="_blank" '
+                    f'rel="noreferrer">{_escape(label)}</a></li>'
+                )
+            else:
+                links.append(f'<li>{_escape(label)} <small>(no URL supplied)</small></li>')
+        parts.append(
+            f'<div class="citations"><strong>Citations</strong><ul>{"".join(links)}</ul></div>'
+        )
+    elif evidence.research_sources:
+        parts.append(
+            f'<small>Research sources: {_escape(", ".join(evidence.research_sources))} '
+            '(no citation URL supplied)</small>'
+        )
+    return "".join(parts)
+
+
+def _screenshot_path(row: dict[str, Any]) -> Path | None:
+    if str(row.get("servicenow_customer") or "").casefold() != "yes":
+        return None
+    candidates: list[Path] = []
+    stored = str(row.get("screenshot_path") or "").strip()
+    if stored:
+        candidates.append(Path(stored))
+    # Existing runs predate per-run screenshot paths. Their result images are
+    # still available in the legacy debug folder.
+    company = str(row.get("company_name") or "")
+    candidates.append(
+        PROJECT_ROOT / "debug" / "screenshots" / f"{safe_filename(company)}_results.png"
+    )
+    allowed_roots = (
+        (PROJECT_ROOT / "data" / "runs").resolve(),
+        (PROJECT_ROOT / "debug" / "screenshots").resolve(),
+    )
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.is_file() and any(resolved.is_relative_to(root) for root in allowed_roots):
+            return resolved
+    return None
+
+
+def _company_cell(row: dict[str, Any]) -> str:
+    company = _escape(row.get("company_name")) or "—"
+    status = _escape(row.get("resolution_status"))
+    error = _escape(row.get("resolution_error"))
+    parts = [company, f"<br><small>{status}</small>"]
+    if error:
+        parts.append(f'<br><small class="resolution-error">{error}</small>')
+    if str(row.get("resolution_status") or "") not in {
+        "apollo_verified",
+        "apollo_cross_verified",
+        "linkedin_headline_verified",
+        "manual_verified",
+    }:
+        parts.append(
+            f'<form class="company-override" method="post" '
+            f'action="/people/{int(row["person_id"])}/company">'
+            f'<input type="hidden" name="run_id" value="{int(row["run_id"])}">'
+            '<input name="company_name" required placeholder="Correct company name">'
+            '<button>Use company</button></form>'
+        )
+    return "".join(parts)
+
+
 def _page(request: Request, selected_run: int | None = None) -> str:
     summaries = DATABASE.summary()
     if selected_run is None and summaries:
         selected_run = int(summaries[0]["id"])
     rows = DATABASE.report_rows(selected_run) if selected_run else []
     run = DATABASE.run(selected_run) if selected_run else None
+    # Reuse the existing table layout while replacing the raw JSON value with
+    # trusted, structured evidence HTML.
+    for row in rows:
+        row["company_cell"] = _SafeHtml(_company_cell(row))
+        row["n8n_status"] = _SafeHtml(_n8n_cell(row))
+        row["n8n_response"] = ""
+        screenshot = _screenshot_path(row)
+        if screenshot:
+            matched_name = _escape(row.get("servicenow_matched_name"))
+            row["servicenow_matched_name"] = _SafeHtml(
+                f'{matched_name}<br><a class="screenshot-link" '
+                f'href="/screenshots/{int(row["person_id"])}" target="_blank">View screenshot</a>'
+            )
     options = "".join(
         f'<option value="{item["id"]}" {"selected" if item["id"] == selected_run else ""}>'
         f'Run #{item["id"]} — {_escape(item["status"])} ({item["people_count"]} people)</option>'
@@ -49,7 +164,7 @@ def _page(request: Request, selected_run: int | None = None) -> str:
     report_rows = "".join(
         "<tr>"
         f"<td>{_escape(row['person_name'])}<br><a href=\"{_escape(row['linkedin_url'])}\" target=\"_blank\" rel=\"noreferrer\">LinkedIn</a></td>"
-        f"<td>{_escape(row['company_name']) or '—'}<br><small>{_escape(row['resolution_status'])}</small></td>"
+        f"<td>{_escape(row['company_cell'])}</td>"
         f"<td>{_escape(row['servicenow_customer']) or '—'}<br><small>{_escape(row['servicenow_matched_name'])}</small></td>"
         f"<td>{_escape(row['check_status']) or 'Waiting'}</td>"
         f"<td>{_escape(row['n8n_status']) or '—'}<br><small>{_escape(row['n8n_response'])[:180]}</small></td>"
@@ -62,6 +177,7 @@ def _page(request: Request, selected_run: int | None = None) -> str:
         run_actions = f"""
             <form method="post" action="/runs/{selected_run}/launch-browser"><button>1. Run instance</button></form>
             <form method="post" action="/runs/{selected_run}/collect"><button class="primary" {'disabled' if run['status'] == 'collecting' else ''}>2. Start collection</button></form>
+            <form method="post" action="/runs/{selected_run}/send-n8n"><button>Send/Retry No results to n8n</button></form>
             <a class="button" href="/reports.csv?run_id={selected_run}">Download report CSV</a>
         """
         if run["collection_log"]:
@@ -79,6 +195,15 @@ def _page(request: Request, selected_run: int | None = None) -> str:
       button.primary {{ background:#1463d9; color:white; }} button:disabled {{ opacity:.5; cursor:not-allowed; }}
       table {{ width:100%; border-collapse:collapse; font-size:14px; }} th, td {{ border-bottom:1px solid #e4e9ef; text-align:left; vertical-align:top; padding:10px 8px; }}
       .message {{ padding:10px; border-radius:6px; }} .success {{ background:#e5f7eb; }} .error {{ background:#fde8e8; }}
+      .badge {{ display:inline-block; background:#e8edf4; border-radius:999px; padding:3px 8px; margin:0 4px 5px 0; font-size:12px; }}
+      .badge.source {{ background:#e7f0ff; color:#164e9b; }} .evidence-status {{ font-weight:700; margin:5px 0; }}
+      .verification {{ margin:4px 0; }} .evidence-note {{ color:#4b586a; margin:5px 0; max-width:420px; }}
+      .citations {{ margin-top:7px; }} .citations ul {{ margin:3px 0 0; padding-left:18px; }}
+      .screenshot-link {{ display:inline-block; margin-top:6px; font-weight:600; }}
+      .resolution-error {{ color:#a12622; }}
+      .company-override {{ display:flex; gap:6px; margin-top:8px; }}
+      .company-override input {{ min-width:180px; padding:6px 8px; }}
+      .company-override button {{ padding:6px 8px; }}
       pre {{ white-space:pre-wrap; max-height:300px; overflow:auto; background:#111827; color:#e5e7eb; padding:12px; border-radius:6px; }}
     </style></head><body>
       <h1>ServiceNow Partner Workflow</h1>
@@ -127,6 +252,40 @@ def clear_database() -> RedirectResponse:
     return RedirectResponse(url="/?message=Local+workflow+database+cleared", status_code=303)
 
 
+@app.post("/people/{person_id}/company")
+def set_company_override(
+    person_id: int,
+    company_name: str = Form(...),
+    run_id: int = Form(...),
+) -> RedirectResponse:
+    company = " ".join(company_name.split())
+    if not company:
+        return RedirectResponse(
+            url=f"/?run_id={run_id}&kind=error&message=Company+name+is+required",
+            status_code=303,
+        )
+    row = next(
+        (
+            item
+            for item in DATABASE.report_rows(run_id)
+            if int(item["person_id"]) == person_id
+        ),
+        None,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Person not found in this run")
+    DATABASE.update_person_resolution(
+        person_id,
+        company_name=company,
+        status="manual_verified",
+        error="Company supplied through dashboard override",
+    )
+    return RedirectResponse(
+        url=f"/?run_id={run_id}&message=Company+override+saved",
+        status_code=303,
+    )
+
+
 @app.post("/runs/{run_id}/launch-browser")
 def open_browser(run_id: int) -> RedirectResponse:
     if not DATABASE.run(run_id):
@@ -150,9 +309,48 @@ def collect(run_id: int, background_tasks: BackgroundTasks) -> RedirectResponse:
     return RedirectResponse(url=f"/?run_id={run_id}&message=Collection+started", status_code=303)
 
 
+@app.post("/runs/{run_id}/send-n8n")
+def send_to_n8n(run_id: int) -> RedirectResponse:
+    if not DATABASE.run(run_id):
+        raise HTTPException(status_code=404, detail="Run not found")
+    for row in DATABASE.report_rows(run_id):
+        evidence = parse_n8n_evidence(
+            str(row.get("n8n_status") or ""), str(row.get("n8n_response") or "")
+        )
+        if (
+            str(row.get("servicenow_customer") or "").lower() == "no"
+            and row.get("n8n_status") in {"sent", "received"}
+            and evidence.parse_error
+        ):
+            DATABASE.mark_n8n_for_retry(int(row["person_id"]))
+    settings = load_settings()
+    sent = send_negatives_to_n8n(DATABASE, run_id, settings)
+    message = f"Sent+{sent}+No+result(s)+to+n8n"
+    kind = "success" if sent else "error"
+    return RedirectResponse(url=f"/?run_id={run_id}&kind={kind}&message={message}", status_code=303)
+
+
 @app.get("/api/reports")
 def reports_api(run_id: int | None = None) -> list[dict[str, Any]]:
     return DATABASE.report_rows(run_id)
+
+
+@app.get("/screenshots/{person_id}")
+def view_screenshot(person_id: int) -> FileResponse:
+    row = next(
+        (item for item in DATABASE.report_rows() if int(item["person_id"]) == person_id),
+        None,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Report row not found")
+    screenshot = _screenshot_path(row)
+    if not screenshot:
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    return FileResponse(
+        screenshot,
+        media_type="image/png",
+        headers={"Content-Disposition": f'inline; filename="{screenshot.name}"'},
+    )
 
 
 @app.get("/reports.csv")
@@ -180,6 +378,6 @@ async def n8n_callback(request: Request) -> dict[str, str]:
     except (ValueError, TypeError, KeyError, json.JSONDecodeError):
         raise HTTPException(status_code=400, detail="JSON body must include integer person_id") from None
     DATABASE.set_n8n_result(
-        person_id, status="received", response=json.dumps(payload, ensure_ascii=False)[:10_000], received=True
+        person_id, status="received", response=json.dumps(payload, ensure_ascii=False), received=True
     )
     return {"status": "stored"}

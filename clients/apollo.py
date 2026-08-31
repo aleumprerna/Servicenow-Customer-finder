@@ -33,6 +33,29 @@ class PersonOrganization:
     name: str
     domain: str = ""
     linkedin_url: str = ""
+    person_name: str = ""
+    person_linkedin_url: str = ""
+    profile_matched: bool = True
+
+
+def linkedin_profile_matches(expected: str, returned: str) -> bool:
+    expected_url = normalize_url(expected)
+    returned_url = normalize_url(returned)
+    if not expected_url or not returned_url:
+        return False
+    if expected_url == returned_url:
+        return True
+    expected_slug = urlsplit(expected_url).path.strip("/").split("/")[-1]
+    returned_slug = urlsplit(returned_url).path.strip("/").split("/")[-1]
+    # LinkedIn vanity names can change while the profile's generated suffix is
+    # retained (for example, name-initial-42bbb310a -> full-name-42bbb310a).
+    expected_suffix = expected_slug.rsplit("-", 1)[-1]
+    returned_suffix = returned_slug.rsplit("-", 1)[-1]
+    return (
+        expected_suffix == returned_suffix
+        and len(expected_suffix) >= 7
+        and any(character.isdigit() for character in expected_suffix)
+    )
 
 
 def normalize_url(value: str | None) -> str:
@@ -45,7 +68,18 @@ def normalize_url(value: str | None) -> str:
     hostname = (parts.hostname or "").lower()
     if hostname.startswith("www."):
         hostname = hostname[4:]
+    if hostname == "linkedin.com" or hostname.endswith(".linkedin.com"):
+        hostname = "linkedin.com"
     path = re.sub(r"/+", "/", parts.path).rstrip("/").lower()
+    path_parts = path.strip("/").split("/")
+    if (
+        len(path_parts) == 3
+        and path_parts[0] == "in"
+        and re.fullmatch(r"[a-z]{2}(?:-[a-z]{2})?", path_parts[-1])
+    ):
+        # Some regional LinkedIn links append a display-language segment, such
+        # as /in/annett-hufe/en. It is not part of the profile identifier.
+        path = "/" + "/".join(path_parts[:2])
     return urlunsplit(("https", hostname, path, "", "")) if hostname else ""
 
 
@@ -172,19 +206,95 @@ class ApolloClient:
         if not isinstance(person, dict):
             raise ApolloNoMatchError("Apollo did not return a person record")
 
+        returned_profile = str(person.get("linkedin_url") or "")
+        profile_matched = linkedin_profile_matches(normalized, returned_profile)
+
+        def with_person_evidence(company: PersonOrganization) -> PersonOrganization:
+            return PersonOrganization(
+                name=company.name,
+                domain=company.domain,
+                linkedin_url=company.linkedin_url,
+                person_name=str(person.get("name") or "").strip(),
+                person_linkedin_url=normalize_url(returned_profile),
+                profile_matched=profile_matched,
+            )
+
+        try:
+            company = self._select_current_organization(person)
+        except ApolloNoMatchError as initial_error:
+            person_id = str(person.get("id") or "").strip()
+            if "did not return a current organization" not in str(initial_error) or not person_id:
+                raise
+            # People Match can identify the person while returning a partial
+            # record. Apollo's complete-person endpoint supplies employment
+            # history and full current-organization details for that stable ID.
+            complete_payload = self._request("GET", f"/people/{person_id}")
+            complete_person = (
+                complete_payload.get("person")
+                if isinstance(complete_payload.get("person"), dict)
+                else complete_payload
+            )
+            if not isinstance(complete_person, dict):
+                raise initial_error
+            person = complete_person
+            returned_profile = str(person.get("linkedin_url") or returned_profile)
+            profile_matched = linkedin_profile_matches(normalized, returned_profile)
+            company = self._select_current_organization(person)
+
+        return with_person_evidence(company)
+
+    def _select_current_organization(self, person: dict[str, Any]) -> PersonOrganization:
         organization = person.get("organization")
-        if isinstance(organization, dict) and isinstance(organization.get("name"), str):
-            name = organization["name"].strip()
-            if name:
-                return PersonOrganization(
-                    name=name,
-                    domain=normalize_domain(
-                        str(organization.get("primary_domain") or organization.get("website_url") or "")
-                    ),
-                    linkedin_url=normalize_url(str(organization.get("linkedin_url") or "")),
-                )
-        label = f" for {person_name}" if person_name else ""
-        raise ApolloNoMatchError(f"Apollo did not return a current organization{label}")
+        primary = self._person_organization(organization) if isinstance(organization, dict) else None
+        history = person.get("employment_history")
+        current: list[tuple[str, PersonOrganization]] = []
+        if isinstance(history, list):
+            for item in history:
+                if not isinstance(item, dict) or item.get("current") is not True:
+                    continue
+                candidate = self._person_organization(item)
+                if candidate:
+                    current.append((str(item.get("organization_id") or ""), candidate))
+
+        if primary:
+            primary_id = str(
+                person.get("organization_id")
+                or (organization.get("id") if isinstance(organization, dict) else "")
+                or ""
+            )
+            if not current or any(
+                (primary_id and item_id == primary_id)
+                or company_match_score(primary.name, item.name) >= self.match_threshold
+                for item_id, item in current
+            ):
+                return primary
+
+        unique_current: dict[str, PersonOrganization] = {}
+        for item_id, item in current:
+            key = item_id or item.name.casefold()
+            unique_current[key] = item
+        if len(unique_current) == 1:
+            return next(iter(unique_current.values()))
+        if len(unique_current) > 1:
+            raise ApolloNoMatchError(
+                "Apollo returned multiple current organizations and no reliable primary employer"
+            )
+        raise ApolloNoMatchError("Apollo did not return a current organization")
+
+    @staticmethod
+    def _person_organization(value: dict[str, Any]) -> PersonOrganization | None:
+        nested = value.get("organization")
+        organization = nested if isinstance(nested, dict) else value
+        name = str(organization.get("name") or value.get("organization_name") or "").strip()
+        if not name:
+            return None
+        return PersonOrganization(
+            name=name,
+            domain=normalize_domain(
+                str(organization.get("primary_domain") or organization.get("website_url") or "")
+            ),
+            linkedin_url=normalize_url(str(organization.get("linkedin_url") or "")),
+        )
 
     def _search(self, company_name: str, domain: str) -> list[dict[str, Any]]:
         params: list[tuple[str, str | int]] = [

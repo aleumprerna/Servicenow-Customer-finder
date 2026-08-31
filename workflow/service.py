@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,12 @@ from workflow.person_company import PersonCompanyResolver
 
 
 RUNS_DIR = PROJECT_ROOT / "data" / "runs"
+TRUSTED_COMPANY_STATUSES = {
+    "apollo_verified",
+    "apollo_cross_verified",
+    "linkedin_headline_verified",
+    "manual_verified",
+}
 
 
 def _clean_header(value: str) -> str:
@@ -87,7 +94,7 @@ def resolve_people(database: WorkflowDatabase, run_id: int, settings: Settings) 
     for person in people:
         # Older runs stored headline guesses without organization identifiers.
         # Refresh those, and any unresolved row, through Apollo People Match.
-        if person["resolution_status"] == "apollo_person_match" and person["company_domain"]:
+        if person["resolution_status"] in TRUSTED_COMPANY_STATUSES:
             continue
         result = resolver.resolve(
             person_name=person["person_name"],
@@ -104,11 +111,19 @@ def resolve_people(database: WorkflowDatabase, run_id: int, settings: Settings) 
 
 def build_pipeline_csv(database: WorkflowDatabase, run_id: int, settings: Settings) -> tuple[Path, Path, int]:
     people = resolve_people(database, run_id, settings)
-    resolved = [person for person in people if person["company_name"].strip()]
+    resolved = [
+        person for person in people
+        if person["company_name"].strip()
+        and person["resolution_status"] in TRUSTED_COMPANY_STATUSES
+    ]
     run_dir = RUNS_DIR / str(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     input_path = run_dir / "companies.csv"
     output_path = run_dir / "companies_checked.csv"
+    # CSVService resumes from an existing output file. A UI collection is an
+    # explicit fresh run, so remove the generated checkpoint first; otherwise
+    # newly resolved Apollo domains/organization URLs would never reach main.py.
+    output_path.unlink(missing_ok=True)
     fields = [
         "company_name", "linkedin_url", "source_person_id", "person_name",
         "source_person_linkedin_url", "headline", "domain",
@@ -147,6 +162,7 @@ def sync_pipeline_results(database: WorkflowDatabase, run_id: int, output_path: 
                 "company_name": row.get("company_name", ""),
                 "servicenow_customer": row.get("servicenow_customer", ""),
                 "servicenow_matched_name": row.get("servicenow_matched_name", ""),
+                "screenshot_path": row.get("servicenow_screenshot", ""),
                 "match_score": row.get("match_score", ""),
                 "check_status": row.get("check_status", ""),
                 "headquarters": row.get("headquarters", ""),
@@ -195,18 +211,24 @@ def send_negatives_to_n8n(database: WorkflowDatabase, run_id: int, settings: Set
                 check["person_id"], status="not_configured", response="N8N_WEBHOOK_URL is not configured"
             )
         return 0
-    sent = 0
-    for check in checks:
+    def deliver(check: dict[str, Any]) -> bool:
         payload = n8n_payload(check, settings.app_base_url)
         try:
             response = requests.post(settings.n8n_webhook_url, json=payload, timeout=30)
             response.raise_for_status()
-            body = response.text[:10_000]
+            # Keep valid JSON intact. Truncating a large response can cut through
+            # a string and make status/citation fields impossible to parse.
+            body = response.text
             database.set_n8n_result(check["person_id"], status="sent", response=body, sent=True)
-            sent += 1
+            return True
         except requests.RequestException as exc:
             database.set_n8n_result(check["person_id"], status="failed", response=str(exc))
-    return sent
+            return False
+
+    # n8n may keep a webhook request open until its workflow finishes. Deliver
+    # independently so one slow workflow cannot block every later company.
+    with ThreadPoolExecutor(max_workers=min(4, len(checks))) as executor:
+        return sum(executor.map(deliver, checks))
 
 
 def run_collection(database: WorkflowDatabase, run_id: int) -> None:
@@ -219,7 +241,7 @@ def run_collection(database: WorkflowDatabase, run_id: int) -> None:
         if not resolved_count:
             database.update_run(
                 run_id,
-                status="completed",
+                status="needs_attention",
                 finished_at=now(),
                 collection_log="No company could be resolved from the uploaded people.",
             )
@@ -228,6 +250,8 @@ def run_collection(database: WorkflowDatabase, run_id: int) -> None:
         environment = os.environ.copy()
         environment["INPUT_CSV"] = str(input_path)
         environment["OUTPUT_CSV"] = str(output_path)
+        environment["DEBUG_DIR"] = str(input_path.parent / "debug")
+        environment["SAVE_SCREENSHOTS"] = "true"
         venv_python = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
         python_executable = str(venv_python) if venv_python.is_file() else sys.executable
         process = subprocess.run(
@@ -244,8 +268,17 @@ def run_collection(database: WorkflowDatabase, run_id: int) -> None:
         log = (process.stdout + "\n" + process.stderr).strip()[-20_000:]
         report_rows = database.report_rows(run_id)
         completed_checks = sum(row["check_status"] == "completed" for row in report_rows)
-        status = "completed" if process.returncode == 0 and completed_checks else "needs_attention"
-        summary = f"Resolved {resolved_count}; synced {sync_count}; sent {sent_count} negative result(s) to n8n.\n{log}"
+        people_count = len(report_rows)
+        status = (
+            "completed"
+            if process.returncode == 0 and people_count > 0 and completed_checks == people_count
+            else "needs_attention"
+        )
+        summary = (
+            f"Resolved {resolved_count}/{people_count}; ServiceNow completed "
+            f"{completed_checks}/{people_count}; synced {sync_count}; sent {sent_count} "
+            f"negative result(s) to n8n.\n{log}"
+        )
         database.update_run(run_id, status=status, finished_at=now(), collection_log=summary)
     except Exception as exc:
         database.update_run(run_id, status="failed", finished_at=now(), collection_log=str(exc))

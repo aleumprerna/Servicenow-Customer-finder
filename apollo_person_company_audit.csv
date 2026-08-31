@@ -1,0 +1,20 @@
+﻿row,person_name,person_linkedin_url,company_name,company_domain,company_linkedin_url,company_status,headquarters,country,country_code,headquarters_status,details
+1,Regitze Reeh,https://dk.linkedin.com/in/regitze-reeh,,,,apollo_profile_conflict,,,,skipped_no_verified_company,Rejected Apollo candidate 'Xellia Pharmaceuticals': it belonged to a different LinkedIn profile and no headline employer was available
+2,Zsombor Marton,https://hu.linkedin.com/in/zsombor-marton-045b3824,MOL Group,molgroup.info,https://linkedin.com/company/mol-group,apollo_verified,"Budapest, Budapest, Hungary",Hungary,HU,verified,
+3,Raymond Moore,https://www.linkedin.com/in/raymond-moore-901b7551,,,,unresolved,,,,skipped_no_verified_company,Apollo did not return a current organization
+4,Ireneusz Fąfara,https://pl.linkedin.com/in/ireneusz-f%C4%85fara-6b23b2aa,ORLEN S.A.,orlen.pl,https://linkedin.com/company/orlen-s.a.,apollo_verified,"Radom, mazowieckie, Poland",Poland,PL,verified,
+5,Susmita Pal,https://in.linkedin.com/in/susmitapal-hse,SBM Offshore,sbmoffshore.com,https://linkedin.com/company/sbmoffshore,apollo_verified,"Schiphol, North Holland, Netherlands",Netherlands,NL,verified,
+6,Annett Hufe,https://de.linkedin.com/in/annett-hufe/en,Wintershall Dea,wintershalldea.com,https://linkedin.com/company/wintershalldea,apollo_verified,"Kassel, Hessen, Germany",Germany,DE,verified,
+7,Gerry Van Steerteghem,https://be.linkedin.com/in/aquanet,Umicore,umicore.com,https://linkedin.com/company/umicore,apollo_verified,"Brussels, Brussels, Belgium",Belgium,BE,verified,
+8,Alvin W.,https://www.linkedin.com/in/alvinjjw,ASML,asml.com,https://linkedin.com/company/asml,apollo_verified,"Veldhoven, Noord-Brabant, Netherlands",Netherlands,NL,verified,
+9,Ankit J.,https://in.linkedin.com/in/ankit-j-41a6489,NXP Semiconductors,nxp.com,https://linkedin.com/company/nxp-semiconductors,apollo_verified,"Eindhoven, North Brabant, Netherlands",Netherlands,NL,verified,
+10,Godfried Terberg,https://nl.linkedin.com/in/godfried-terberg-9775a324,Royal Terberg Group,royalterberggroup.com,https://linkedin.com/company/terberg,apollo_verified,"IJsselstein, Utrecht, Netherlands",Netherlands,NL,verified,
+11,Jeroen Verbeek,https://nl.linkedin.com/in/jeroen-verbeek-3a86a960,Prodrive Technologies,prodrive-technologies.com,https://linkedin.com/company/prodrivetechnologies,apollo_verified,"Son, Noord-Brabant, Netherlands",Netherlands,NL,verified,
+12,Frederico Ayres Lima,https://be.linkedin.com/in/fredericoayreslima/en,Aperam,aperam.com,https://linkedin.com/company/aperam,apollo_verified,"Luxembourg City, Luxembourg, Luxembourg",Luxembourg,LU,verified,
+13,Ashwin Sathawane,https://in.linkedin.com/in/ashwin-sathawane-4264704a,ABB,abb.com,https://linkedin.com/company/abb,apollo_verified,"Zuerich, Zuerich, Switzerland",Switzerland,CH,verified,
+14,Atul Dharap,https://in.linkedin.com/in/atul-dharap-87228a35,SKF ISEAM,,https://linkedin.com/company/skf-india-limited,apollo_verified,"Pimpri-Chinchwad, Maharashtra, India",India,IN,verified,
+15,Raja Moudgil,https://in.linkedin.com/in/raja-moudgil,Signify,signify.com,https://linkedin.com/company/signifycompany,apollo_verified,"Eindhoven, North Brabant, Netherlands",Netherlands,NL,verified,
+16,Sanjay Patangay,https://in.linkedin.com/in/sanjay-patangay,Nouryon,nouryon.com,https://linkedin.com/company/nouryon,apollo_verified,"Amsterdam, North Holland, Netherlands",Netherlands,NL,verified,
+17,Davy Myny,https://be.linkedin.com/in/davy-myny-a59282b,Vynova Group,vynova-group.com,https://linkedin.com/company/vynova-group,apollo_verified,"Tessenderlo-Ham, Vlaams Gewest, Belgium",Belgium,BE,verified,
+18,Saurav Pandey,https://in.linkedin.com/in/saurav-pandey-b659b0131,Bridgestone EMEA,bridgestone-emea.com,https://linkedin.com/company/bridgestoneemea,apollo_verified,"Zaventem, Flanders, Belgium",Belgium,BE,verified,
+19,Sean McGrath,https://www.linkedin.com/in/seanmcgrath24,La Lorraine Bakery Group,llbg.com,https://linkedin.com/company/la-lorraine-bakery-group,apollo_verified,"Ninove, Flanders, Belgium",Belgium,BE,verified,
