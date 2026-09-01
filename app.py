@@ -302,6 +302,142 @@ def _report_card(row: dict[str, Any]) -> str:
       </details>"""
 
 
+def _table_person_link(row: dict[str, Any]) -> str:
+    person = _escape(row.get("person_name")) or "Unnamed person"
+    linkedin = _escape(row.get("linkedin_url"))
+    if not linkedin:
+        return f'<span class="table-person">{person}</span>'
+    return (
+        f'<a class="table-person" href="{linkedin}" target="_blank" '
+        f'rel="noreferrer">{person}</a>'
+    )
+
+
+def _status_pill(label: str, tone: str = "neutral") -> str:
+    return f'<span class="status-pill {tone}">{_escape(label)}</span>'
+
+
+def _enrichment_table(rows: list[dict[str, Any]]) -> str:
+    body: list[str] = []
+    for row in rows:
+        trusted = str(row.get("resolution_status") or "") in TRUSTED_COMPANY_STATUSES
+        approval = _status_pill("Ready", "success") if trusted else _status_pill("Needs approval", "warning")
+        company = _escape(row.get("company_name")) or "Company unresolved"
+        resolution_details = ""
+        if not trusted:
+            reason = _escape(row.get("resolution_error")) or "Apollo could not provide enough evidence to verify this company automatically."
+            resolution_details = f"""
+              <details class="table-review">
+                <summary>Review company</summary>
+                <p>{reason}</p>
+                <form class="company-override" method="post" action="/people/{int(row['person_id'])}/company">
+                  <input type="hidden" name="run_id" value="{int(row['run_id'])}">
+                  <input name="company_name" required placeholder="Correct company name">
+                  <button>Approve company</button>
+                </form>
+              </details>"""
+        location = ", ".join(
+            item for item in (_escape(row.get("headquarters")), _escape(row.get("country"))) if item
+        ) or "Not available"
+        body.append(
+            f"""
+            <tr>
+              <td>{_table_person_link(row)}<span class="cell-secondary">{_escape(row.get('headline')) or 'No headline returned'}</span></td>
+              <td><strong>{company}</strong><span class="cell-secondary">{_escape(row.get('apollo_company_name')) or 'No Apollo organization name'}</span></td>
+              <td>{approval}{resolution_details}</td>
+              <td>{_pretty_status(row.get('resolution_status'), 'Waiting')}</td>
+              <td>{location}</td>
+            </tr>"""
+        )
+    if not body:
+        body.append('<tr><td class="table-empty" colspan="5">Upload a CSV to see enriched records.</td></tr>')
+    return f"""
+      <div class="table-scroll"><table class="data-table">
+        <thead><tr><th>Person</th><th>Resolved company</th><th>Approval</th><th>Resolution</th><th>Company location</th></tr></thead>
+        <tbody>{''.join(body)}</tbody>
+      </table></div>"""
+
+
+def _automation_table(rows: list[dict[str, Any]]) -> str:
+    body: list[str] = []
+    status_labels = {
+        "apollo_success": ("Ready to run", "info"),
+        "completed": ("Completed", "success"),
+        "manual_review": ("Manual review", "warning"),
+        "error": ("Error", "danger"),
+    }
+    for row in rows:
+        raw_status = str(row.get("check_status") or "")
+        label, tone = status_labels.get(raw_status, ("Waiting for enrichment", "neutral"))
+        customer = str(row.get("servicenow_customer") or "")
+        customer_tone = "success" if customer.casefold() == "yes" else "neutral"
+        customer_html = _status_pill(_pretty_status(customer, "Not checked"), customer_tone)
+        score = _escape(row.get("match_score"))
+        match = _escape(row.get("servicenow_matched_name")) or "No match recorded"
+        if score:
+            match += f' <span class="cell-secondary">{score}% confidence</span>'
+        evidence_link = "Not available"
+        if _screenshot_path(row):
+            evidence_link = f'<a href="/screenshots/{int(row["person_id"])}" target="_blank">View screenshot</a>'
+        error = _escape(row.get("error_message"))
+        error_html = f'<span class="cell-error">{error}</span>' if error else ""
+        body.append(
+            f"""
+            <tr>
+              <td>{_table_person_link(row)}<span class="cell-secondary">{_escape(row.get('company_name')) or 'Company unresolved'}</span></td>
+              <td>{_status_pill(label, tone)}{error_html}</td>
+              <td>{customer_html}</td>
+              <td>{match}</td>
+              <td>{_escape(row.get('checked_at')) or 'Not checked yet'}</td>
+              <td>{evidence_link}</td>
+            </tr>"""
+        )
+    if not body:
+        body.append('<tr><td class="table-empty" colspan="6">No records are ready for web automation.</td></tr>')
+    return f"""
+      <div class="table-scroll"><table class="data-table">
+        <thead><tr><th>Person &amp; company</th><th>Automation status</th><th>ServiceNow customer</th><th>Matched result</th><th>Checked</th><th>Evidence</th></tr></thead>
+        <tbody>{''.join(body)}</tbody>
+      </table></div>"""
+
+
+def _final_results_table(rows: list[dict[str, Any]]) -> str:
+    body: list[str] = []
+    for row in rows:
+        evidence = parse_n8n_evidence(
+            str(row.get("n8n_status") or ""), str(row.get("n8n_response") or "")
+        )
+        relationship = _relationship(row, evidence)
+        relationship_tone = _relationship_tone(relationship)
+        source_tags = list(evidence.source_tags)
+        if str(row.get("servicenow_customer") or "").casefold() == "yes":
+            source_tags.insert(0, "ServiceNow integration app")
+        source_tags = list(dict.fromkeys(source_tags))
+        sources = "".join(
+            f'<span class="source-tag">{_escape(tag)}</span>' for tag in source_tags
+        ) or '<span class="cell-secondary">No confirming source</span>'
+        trusted = str(row.get("resolution_status") or "") in TRUSTED_COMPANY_STATUSES
+        approval = "" if trusted else _status_pill("Needs approval", "warning")
+        body.append(
+            f"""
+            <tr>
+              <td>{_table_person_link(row)}<span class="cell-secondary">{_escape(row.get('company_name')) or 'Company unresolved'}</span>{approval}</td>
+              <td>{_status_pill(relationship, relationship_tone)}</td>
+              <td>{_pretty_status(row.get('servicenow_customer'), 'Not checked')}</td>
+              <td><div class="source-tags">{sources}</div></td>
+              <td>{_status_pill(evidence.delivery_status or 'Waiting', 'info' if evidence.delivery_status else 'neutral')}</td>
+              <td><details class="table-evidence"><summary>View evidence</summary>{_n8n_cell(row)}</details></td>
+            </tr>"""
+        )
+    if not body:
+        body.append('<tr><td class="table-empty" colspan="6">Final results will appear after processing.</td></tr>')
+    return f"""
+      <div class="table-scroll"><table class="data-table final-table">
+        <thead><tr><th>Person &amp; company</th><th>Final status</th><th>ServiceNow app</th><th>Sources</th><th>n8n delivery</th><th>Details</th></tr></thead>
+        <tbody>{''.join(body)}</tbody>
+      </table></div>"""
+
+
 def _page(request: Request, selected_run: int | None = None) -> str:
     summaries = DATABASE.summary()
     if selected_run is None and summaries:
@@ -313,10 +449,6 @@ def _page(request: Request, selected_run: int | None = None) -> str:
         f'Run #{item["id"]} — {_escape(item["status"])} ({item["people_count"]} people)</option>'
         for item in summaries
     )
-    report_cards = "".join(_report_card(row) for row in rows)
-    if not report_cards:
-        report_cards = '<div class="empty-state"><strong>No reports yet</strong><span>Upload a people CSV to begin.</span></div>'
-
     relationships = [
         _relationship(
             row,
@@ -342,20 +474,103 @@ def _page(request: Request, selected_run: int | None = None) -> str:
         <div><strong>{integration_count}</strong><span>Integration app matches</span></div>
         <div><strong>{attention_count}</strong><span>Need attention</span></div>
       </div>"""
-    run_actions = ""
+    enriched_count = sum(row.get("check_status") is not None for row in rows)
+    automation_count = sum(
+        str(row.get("check_status") or "").casefold() in {"completed", "manual_review", "error"}
+        for row in rows
+    )
+    approved_count = sum(
+        str(row.get("resolution_status") or "") in TRUSTED_COMPANY_STATUSES for row in rows
+    )
+
+    workflow_steps = '<div class="empty-state"><strong>No active run</strong><span>Upload a CSV to start the workflow.</span></div>'
     run_log = ""
     if run:
         busy = run["status"] in {"enriching", "collecting"}
-        disabled = "disabled" if busy else ""
-        run_actions = f"""
-            <form method="post" action="/runs/{selected_run}/enrich"><button class="primary" {disabled}>1. Enrich records</button></form>
-            <form method="post" action="/runs/{selected_run}/launch-browser"><button {disabled}>2. Run instance</button></form>
-            <form method="post" action="/runs/{selected_run}/collect"><button class="primary" {disabled}>3. Start web automation</button></form>
-            <form method="post" action="/runs/{selected_run}/send-n8n"><button>Send/Retry No results to n8n</button></form>
-            <a class="button" href="/reports.csv?run_id={selected_run}">Download report CSV</a>
-        """
+        enrichment_complete = enriched_count > 0
+        automation_complete = automation_count > 0
+        final_complete = run["status"] == "completed"
+        step_one_state = "active" if run["status"] == "enriching" or not enrichment_complete else "complete"
+        step_two_state = (
+            "active" if run["status"] == "collecting" or (enrichment_complete and not automation_complete)
+            else "complete" if automation_complete else "locked"
+        )
+        step_three_state = "complete" if final_complete else "active" if automation_complete else "locked"
+        enrich_disabled = "disabled" if busy else ""
+        automation_disabled = "disabled" if busy or not enrichment_complete else ""
+        final_disabled = "disabled" if busy or not automation_complete else ""
+        enrich_label = "Enriching records…" if run["status"] == "enriching" else "Enrich records"
+        automation_label = "Automation running…" if run["status"] == "collecting" else "Start web automation"
+        download_action = (
+            f'<a class="button primary-link" href="/reports.csv?run_id={selected_run}">Download CSV</a>'
+            if automation_complete
+            else '<span class="button disabled-link" aria-disabled="true">Download CSV</span>'
+        )
+        workflow_steps = f"""
+          <div class="workflow-progress">
+            <article class="workflow-step {step_one_state}">
+              <div class="step-top"><span class="step-number">{'✓' if enrichment_complete else '1'}</span><span class="step-state">{approved_count}/{len(rows)} approved</span></div>
+              <h3>Enrich records</h3>
+              <p>Resolve each LinkedIn profile and enrich its company with Apollo.</p>
+              <div class="step-metric"><strong>{enriched_count}</strong><span>of {len(rows)} records enriched</span></div>
+              <form method="post" action="/runs/{selected_run}/enrich"><button class="primary step-action" {enrich_disabled}>{enrich_label}</button></form>
+            </article>
+            <article class="workflow-step {step_two_state}">
+              <div class="step-top"><span class="step-number">{'✓' if automation_complete else '2'}</span><span class="step-state">{automation_count}/{len(rows)} checked</span></div>
+              <h3>Run web automation</h3>
+              <p>Open ServiceNow, sign in, then start the browser checks using saved enrichment.</p>
+              <div class="step-actions">
+                <form method="post" action="/runs/{selected_run}/launch-browser"><button {automation_disabled}>Open ServiceNow</button></form>
+                <form method="post" action="/runs/{selected_run}/collect"><button class="primary" {automation_disabled}>{automation_label}</button></form>
+              </div>
+            </article>
+            <article class="workflow-step {step_three_state}">
+              <div class="step-top"><span class="step-number">{'✓' if final_complete else '3'}</span><span class="step-state">{confirmed_count} confirmed</span></div>
+              <h3>Review final results</h3>
+              <p>Review verification evidence, retry deliveries, or export the completed table.</p>
+              <div class="step-actions">
+                <form method="post" action="/runs/{selected_run}/send-n8n"><button {final_disabled}>Retry n8n delivery</button></form>
+                {download_action}
+              </div>
+            </article>
+          </div>"""
         if run["collection_log"]:
-            run_log = f"<details><summary>Collection log</summary><pre>{_escape(run['collection_log'])}</pre></details>"
+            run_log = f'<details class="run-log"><summary>View latest run log</summary><pre>{_escape(run["collection_log"])}</pre></details>'
+
+    default_tab = "final" if automation_count else "automation" if enriched_count else "enriched"
+    enriched_active = default_tab == "enriched"
+    automation_active = default_tab == "automation"
+    final_active = default_tab == "final"
+    final_export = (
+        f'<a class="button" href="/reports.csv?run_id={selected_run}">Export CSV</a>'
+        if selected_run
+        else '<span class="button disabled-link" aria-disabled="true">Export CSV</span>'
+    )
+    record_tabs = f"""
+      <div class="record-tabs" role="tablist" aria-label="Workflow records">
+        <button type="button" class="tab-button {'active' if enriched_active else ''}" role="tab" aria-selected="{str(enriched_active).lower()}" aria-controls="panel-enriched" id="tab-enriched" data-tab="enriched">
+          <span>Enriched records</span><strong>{enriched_count}/{len(rows)}</strong>
+        </button>
+        <button type="button" class="tab-button {'active' if automation_active else ''}" role="tab" aria-selected="{str(automation_active).lower()}" aria-controls="panel-automation" id="tab-automation" data-tab="automation">
+          <span>Web automation</span><strong>{automation_count}/{len(rows)}</strong>
+        </button>
+        <button type="button" class="tab-button {'active' if final_active else ''}" role="tab" aria-selected="{str(final_active).lower()}" aria-controls="panel-final" id="tab-final" data-tab="final">
+          <span>Final table</span><strong>{confirmed_count}/{len(rows)}</strong>
+        </button>
+      </div>
+      <div class="tab-panel" id="panel-enriched" role="tabpanel" aria-labelledby="tab-enriched" {'hidden' if not enriched_active else ''}>
+        <div class="panel-heading"><div><h3>Enriched records</h3><p>Identity, Apollo company resolution, approval status, and organization data.</p></div></div>
+        {_enrichment_table(rows)}
+      </div>
+      <div class="tab-panel" id="panel-automation" role="tabpanel" aria-labelledby="tab-automation" {'hidden' if not automation_active else ''}>
+        <div class="panel-heading"><div><h3>Web automation</h3><p>ServiceNow browser-check progress, matches, confidence, and screenshots.</p></div></div>
+        {_automation_table(rows)}
+      </div>
+      <div class="tab-panel" id="panel-final" role="tabpanel" aria-labelledby="tab-final" {'hidden' if not final_active else ''}>
+        <div class="panel-heading"><div><h3>Final results</h3><p>Combined ServiceNow result, verification sources, and n8n delivery status.</p></div>{final_export}</div>
+        {report_stats}
+        {_final_results_table(rows)}
+      </div>"""
 
     refresh = (
         '<meta http-equiv="refresh" content="12">'
@@ -366,7 +581,7 @@ def _page(request: Request, selected_run: int | None = None) -> str:
     <html><head><meta charset="utf-8">{refresh}<title>ServiceNow Partner Workflow</title>
     <style>
       * {{ box-sizing:border-box; }}
-      body {{ font-family:Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; max-width:1240px; margin:0 auto; color:#172033; padding:38px 20px 64px; background:#f5f7fb; }}
+      body {{ font-family:Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; max-width:1440px; margin:0 auto; color:#172033; padding:38px 20px 64px; background:#f5f7fb; }}
       h1 {{ margin:0 0 6px; letter-spacing:-.035em; font-size:32px; }} h2 {{ margin:0 0 8px; letter-spacing:-.02em; }}
       .muted, small {{ color:#68758a; }}
       section {{ background:#fff; border:1px solid #e3e8f0; border-radius:16px; padding:22px; margin:18px 0; box-shadow:0 8px 28px rgba(30,45,75,.045); }}
@@ -385,6 +600,27 @@ def _page(request: Request, selected_run: int | None = None) -> str:
       .company-override input {{ min-width:180px; padding:6px 8px; }}
       .company-override button {{ padding:6px 8px; }}
       pre {{ white-space:pre-wrap; max-height:300px; overflow:auto; background:#111827; color:#e5e7eb; padding:12px; border-radius:6px; }}
+      .page-header {{ display:flex; align-items:flex-end; justify-content:space-between; gap:24px; margin-bottom:20px; }} .page-header p {{ margin:0; }}
+      .upload-section {{ display:flex; align-items:center; justify-content:space-between; gap:24px; padding:18px 22px; }} .upload-copy h2 {{ font-size:17px; margin-bottom:4px; }} .upload-copy p {{ margin:0; max-width:760px; font-size:13px; }} .upload-section form {{ display:flex; align-items:center; margin:0; }}
+      .section-heading {{ display:flex; align-items:center; justify-content:space-between; gap:18px; margin-bottom:20px; }} .section-heading p {{ margin:4px 0 0; }} .run-picker {{ display:flex; align-items:center; gap:9px; margin:0; }} .run-picker label {{ color:#68758a; font-size:12px; font-weight:700; }}
+      .run-status {{ display:inline-flex; border-radius:999px; background:#edf3fb; color:#315b8e; padding:6px 10px; font-size:12px; font-weight:750; }}
+      .workflow-progress {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }}
+      .workflow-step {{ position:relative; display:flex; flex-direction:column; min-height:245px; padding:20px; border:1px solid #e1e7ef; border-top:4px solid #d5dce7; border-radius:13px; background:#fafbfc; }}
+      .workflow-step.active {{ border-top-color:#1769e0; background:#fff; box-shadow:0 7px 20px rgba(31,74,135,.08); }} .workflow-step.complete {{ border-top-color:#20a266; background:#fbfffd; }} .workflow-step.locked {{ opacity:.7; }}
+      .step-top {{ display:flex; align-items:center; justify-content:space-between; gap:10px; }} .step-number {{ display:grid; place-items:center; width:29px; height:29px; border-radius:50%; background:#e9edf3; color:#536175; font-weight:800; font-size:13px; }}
+      .workflow-step.active .step-number {{ background:#1769e0; color:#fff; }} .workflow-step.complete .step-number {{ background:#20a266; color:#fff; }} .step-state {{ color:#6d798c; font-size:12px; font-weight:700; }}
+      .workflow-step h3 {{ margin:17px 0 5px; font-size:16px; }} .workflow-step p {{ min-height:42px; margin:0 0 16px; color:#68758a; font-size:13px; line-height:1.55; }} .step-metric {{ display:flex; align-items:baseline; gap:6px; margin:auto 0 12px; }} .step-metric strong {{ font-size:24px; }} .step-metric span {{ color:#68758a; font-size:12px; }}
+      .step-actions {{ display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:auto; }} .step-actions form, .workflow-step > form {{ margin:0; }} .step-actions button, .step-actions .button, .step-action {{ min-height:38px; }} .primary-link {{ background:#1769e0; border-color:#1769e0; color:#fff; padding:9px 12px; }} .primary-link:hover {{ background:#1157bd; }}
+      .disabled-link {{ opacity:.5; cursor:not-allowed; padding:9px 12px; }}
+      .run-log {{ margin-top:16px; border-top:1px solid #edf0f4; padding-top:13px; }} .run-log > summary {{ width:max-content; cursor:pointer; color:#526077; font-size:13px; font-weight:700; }} .run-log pre {{ margin-bottom:0; }}
+      .records-workspace {{ padding:0; overflow:hidden; }} .records-heading {{ padding:22px 24px 0; }} .records-heading p {{ margin:4px 0 0; }}
+      .record-tabs {{ display:flex; gap:6px; padding:18px 24px 0; border-bottom:1px solid #e4e9f0; overflow-x:auto; }} .tab-button {{ display:flex; align-items:center; gap:10px; padding:11px 14px 13px; border:0; border-bottom:3px solid transparent; border-radius:8px 8px 0 0; background:transparent; color:#68758a; white-space:nowrap; }} .tab-button:hover {{ background:#f5f7fa; }} .tab-button.active {{ border-bottom-color:#1769e0; background:#eef5ff; color:#1558b0; }} .tab-button strong {{ display:inline-flex; border-radius:999px; padding:2px 7px; background:#e8edf4; color:#536175; font-size:11px; }} .tab-button.active strong {{ background:#d8e9ff; color:#1558b0; }}
+      .tab-panel {{ padding:0 24px 24px; }} .tab-panel[hidden] {{ display:none; }} .panel-heading {{ display:flex; align-items:center; justify-content:space-between; gap:20px; padding:22px 0 14px; }} .panel-heading h3 {{ margin:0 0 3px; font-size:17px; }} .panel-heading p {{ margin:0; color:#68758a; font-size:13px; }}
+      .table-scroll {{ overflow:auto; border:1px solid #e2e7ef; border-radius:11px; }} .data-table {{ width:100%; border-collapse:collapse; background:#fff; font-size:13px; }} .data-table th {{ padding:11px 13px; background:#f7f9fb; border-bottom:1px solid #dfe5ed; color:#69758a; font-size:11px; letter-spacing:.035em; text-align:left; text-transform:uppercase; white-space:nowrap; }} .data-table td {{ min-width:120px; padding:13px; border-bottom:1px solid #edf0f4; vertical-align:top; line-height:1.45; }} .data-table tbody tr:last-child td {{ border-bottom:0; }} .data-table tbody tr:hover {{ background:#fbfcfe; }}
+      .table-person {{ display:block; width:max-content; max-width:220px; color:#172033; font-weight:750; text-decoration:none; }} a.table-person:hover {{ color:#1769c2; text-decoration:underline; }} .cell-secondary {{ display:block; margin-top:3px; color:#758196; font-size:11px; font-weight:500; }} .cell-error {{ display:block; max-width:240px; margin-top:6px; color:#a13b32; font-size:11px; }}
+      .status-pill {{ display:inline-flex; align-items:center; width:max-content; border-radius:999px; padding:4px 8px; background:#edf1f5; color:#59667a; font-size:11px; font-weight:750; white-space:nowrap; }} .status-pill.success, .status-pill.positive {{ background:#e7f7ee; color:#13744a; }} .status-pill.warning {{ background:#fff4dc; color:#8a5a0d; }} .status-pill.danger {{ background:#fdebea; color:#a13b32; }} .status-pill.info {{ background:#e9f2ff; color:#245b9e; }} .status-pill.pending {{ background:#edf1f5; color:#59667a; }}
+      .table-review, .table-evidence {{ margin-top:7px; }} .table-review > summary, .table-evidence > summary {{ width:max-content; cursor:pointer; color:#1769c2; font-size:11px; font-weight:700; }} .table-review p {{ max-width:280px; margin:8px 0; color:#8a5a0d; font-size:11px; }} .table-review .company-override {{ flex-direction:column; align-items:flex-start; }} .table-review .company-override input {{ width:220px; min-width:0; }} .table-empty {{ padding:36px !important; color:#758196; text-align:center; }} .final-table .source-tags {{ min-width:180px; }}
+      .maintenance {{ margin:18px 2px 0; color:#68758a; font-size:12px; }} .maintenance > summary {{ cursor:pointer; width:max-content; font-weight:700; }} .maintenance-body {{ margin-top:10px; padding:14px; border:1px solid #e3e8f0; border-radius:10px; background:#fff; }}
       .reports-section {{ padding:0; overflow:hidden; }} .reports-heading {{ padding:24px 24px 18px; border-bottom:1px solid #e8ecf2; }}
       .reports-heading p {{ margin:0; }}
       .report-stats {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:1px; background:#e8ecf2; border-bottom:1px solid #e8ecf2; }}
@@ -415,31 +651,45 @@ def _page(request: Request, selected_run: int | None = None) -> str:
       .screenshot-block img {{ display:block; width:100%; max-height:170px; object-fit:cover; object-position:top; border:1px solid #e1e6ed; border-radius:7px; }}
       .detail-alert {{ color:#a13b32; background:#fff0ee; border-radius:7px; padding:8px 10px; font-size:12px; }}
       .empty-state {{ padding:52px 20px; text-align:center; color:#68758a; display:flex; flex-direction:column; gap:5px; }}
-      @media (max-width:850px) {{ .report-stats {{ grid-template-columns:1fr 1fr; }} .report-card summary {{ grid-template-columns:1fr auto; }} .source-tags {{ grid-column:1 / -1; }} .relationship {{ justify-self:end; }} .expand-label {{ grid-column:2; grid-row:2; }} .detail-grid, .evidence-section {{ grid-template-columns:1fr; }} }}
-      @media (max-width:520px) {{ body {{ padding:24px 10px 40px; }} section {{ border-radius:12px; padding:16px; }} .reports-section {{ padding:0; }} .report-card summary {{ padding:15px; gap:12px; }} .show-more, .show-less {{ display:none !important; }} dl > div {{ grid-template-columns:1fr; gap:3px; }} }}
+      @media (max-width:950px) {{ .workflow-progress {{ grid-template-columns:1fr; }} .workflow-step {{ min-height:0; }} .workflow-step p {{ min-height:0; }} .step-metric {{ margin-top:4px; }} }}
+      @media (max-width:850px) {{ .page-header, .upload-section, .section-heading {{ align-items:flex-start; flex-direction:column; }} .report-stats {{ grid-template-columns:1fr 1fr; }} .report-card summary {{ grid-template-columns:1fr auto; }} .source-tags {{ grid-column:1 / -1; }} .relationship {{ justify-self:end; }} .expand-label {{ grid-column:2; grid-row:2; }} .detail-grid, .evidence-section {{ grid-template-columns:1fr; }} }}
+      @media (max-width:520px) {{ body {{ padding:24px 10px 40px; }} section {{ border-radius:12px; padding:16px; }} .upload-section form {{ align-items:stretch; flex-direction:column; width:100%; }} .upload-section input, .upload-section button {{ width:100%; }} .records-workspace {{ padding:0; }} .records-heading {{ padding:18px 16px 0; }} .record-tabs {{ padding-left:16px; padding-right:16px; }} .tab-panel {{ padding:0 16px 16px; }} .report-card summary {{ padding:15px; gap:12px; }} .show-more, .show-less {{ display:none !important; }} dl > div {{ grid-template-columns:1fr; gap:3px; }} }}
     </style></head><body>
-      <h1>ServiceNow Partner Workflow</h1>
-      <p class="muted">Upload people → enrich records → log into ServiceNow → run web automation → send verified “No” results to n8n.</p>
+      <header class="page-header"><div><h1>ServiceNow Partner Workflow</h1><p class="muted">Move from LinkedIn profiles to verified ServiceNow results in three clear stages.</p></div></header>
       {_message(request)}
-      <section><h2>Upload people CSV</h2>
-        <p class="muted">Required headings: person name and LinkedIn URL. Automatic company resolution uses only Apollo data returned for that identity. CSV headline/company values remain report context and are not used as resolution evidence.</p>
+      <section class="upload-section"><div class="upload-copy"><h2>Upload people CSV</h2>
+        <p class="muted">Required: person name and LinkedIn URL. Apollo data alone is used for automatic company resolution.</p></div>
         <form method="post" action="/runs" enctype="multipart/form-data"><input type="file" name="file" accept=".csv,text/csv" required><button class="primary">Upload CSV</button></form>
       </section>
-      <section><h2>Current run</h2>
-        <form method="get" action="/"><select name="run_id" onchange="this.form.submit()">{options}</select></form>
-        <div>{run_actions}</div>
-        <p class="muted">Enrich records runs Apollo API calls only. Run instance opens Chrome for manual ServiceNow login. Start web automation uses the saved enrichment and does not call Apollo.</p>
+      <section class="workflow-section">
+        <div class="section-heading"><div><h2>Workflow progress</h2><p class="muted">Complete each stage from left to right.</p></div>
+          <form class="run-picker" method="get" action="/"><label for="run-select">Current run</label><select id="run-select" name="run_id" onchange="this.form.submit()">{options}</select>{f'<span class="run-status">{_pretty_status(run["status"])}</span>' if run else ''}</form>
+        </div>
+        {workflow_steps}
         {run_log}
       </section>
-      <section><h2>Database maintenance</h2>
-        <p class="muted">Clears local workflow runs and reports only. Your CSV files, configuration, Chrome profile, and source code remain unchanged.</p>
-        <form method="post" action="/database/clear" onsubmit="return confirm('Delete every local workflow run and report? This cannot be undone.');"><button>Clear database</button></form>
+      <section class="records-workspace">
+        <div class="records-heading"><h2>Records</h2><p class="muted">Switch views to inspect the data produced at each workflow stage.</p></div>
+        {record_tabs}
       </section>
-      <section class="reports-section">
-        <div class="reports-heading"><h2>Reports</h2><p class="muted">The essentials at a glance. Select a person to open evidence, citations, and screenshots.</p></div>
-        {report_stats}
-        <div class="report-list">{report_cards}</div>
-      </section>
+      <details class="maintenance"><summary>Database maintenance</summary><div class="maintenance-body"><p>Clears local workflow runs and reports only. CSV files, configuration, Chrome profile, and source code remain unchanged.</p><form method="post" action="/database/clear" onsubmit="return confirm('Delete every local workflow run and report? This cannot be undone.');"><button>Clear database</button></form></div></details>
+      <script>
+        const tabButtons = Array.from(document.querySelectorAll('.tab-button'));
+        const tabPanels = Array.from(document.querySelectorAll('.tab-panel'));
+        function activateTab(name, updateHash = true) {{
+          if (!tabButtons.some(button => button.dataset.tab === name)) return;
+          tabButtons.forEach(button => {{
+            const active = button.dataset.tab === name;
+            button.classList.toggle('active', active);
+            button.setAttribute('aria-selected', String(active));
+          }});
+          tabPanels.forEach(panel => {{ panel.hidden = panel.id !== `panel-${{name}}`; }});
+          if (updateHash) history.replaceState(null, '', `#${{name}}`);
+        }}
+        tabButtons.forEach(button => button.addEventListener('click', () => activateTab(button.dataset.tab)));
+        const requestedTab = location.hash.slice(1);
+        if (requestedTab) activateTab(requestedTab, false);
+      </script>
     </body></html>"""
 
 
