@@ -31,6 +31,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, help="Process only the first N selected rows")
     parser.add_argument("--env-file", type=Path, help="Use an alternative .env file")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
+    stages = parser.add_mutually_exclusive_group()
+    stages.add_argument(
+        "--enrich-only",
+        action="store_true",
+        help="Run Apollo enrichment and checkpoint the CSV without opening a browser",
+    )
+    stages.add_argument(
+        "--automation-only",
+        action="store_true",
+        help="Run ServiceNow browser automation using previously enriched CSV rows",
+    )
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be at least 1")
@@ -85,20 +96,91 @@ async def enrich_or_override(
     )
 
 
-async def run(args: argparse.Namespace, settings: Settings) -> int:
-    csv_service = CSVService(settings.input_csv, settings.output_csv)
-    indices = csv_service.selected_indices(
-        force=args.force, company=args.company, limit=args.limit
-    )
-    if args.company and not indices:
-        LOGGER.error("No eligible CSV row matched --company %r", args.company)
-        return 2
-    if not indices:
-        LOGGER.info("No pending companies to process. Use --force to recheck completed rows.")
-        return 0
+async def enrich_indices(
+    csv_service: CSVService,
+    indices: list[int],
+    settings: Settings,
+) -> None:
+    """Checkpoint Apollo organization data without touching the browser."""
 
     apollo = build_apollo_client(settings)
-    LOGGER.info("Preparing to process %d company row(s)", len(indices))
+    for position, index in enumerate(indices, start=1):
+        try:
+            record = csv_service.record(index)
+        except (ValidationError, ValueError) as exc:
+            csv_service.update(
+                index,
+                servicenow_customer="Unknown",
+                check_status=CheckStatus.ERROR,
+                error_message=clean_error(exc),
+            )
+            csv_service.save()
+            LOGGER.error("[%d/%d] Invalid CSV row: %s", position, len(indices), clean_error(exc))
+            continue
+
+        LOGGER.info("[%d/%d] Enriching %s", position, len(indices), record.company_name)
+        try:
+            headquarters, country, country_code, apollo_name = await enrich_or_override(
+                record, apollo
+            )
+            csv_service.update(
+                index,
+                headquarters=headquarters,
+                country=country,
+                country_code=country_code,
+                apollo_company_name=apollo_name,
+                servicenow_customer="",
+                servicenow_matched_name="",
+                servicenow_screenshot="",
+                match_score="",
+                check_status=CheckStatus.APOLLO_SUCCESS,
+                error_message="",
+                checked_at="",
+            )
+        except (ApolloError, CountryNormalizationError) as exc:
+            csv_service.update(
+                index,
+                servicenow_customer="Unknown",
+                check_status=CheckStatus.APOLLO_FAILED,
+                error_message=clean_error(exc),
+                checked_at=record.checked_now(),
+            )
+            LOGGER.error("Apollo enrichment failed: %s", clean_error(exc))
+        except Exception as exc:
+            csv_service.update(
+                index,
+                servicenow_customer="Unknown",
+                check_status=CheckStatus.APOLLO_FAILED,
+                error_message=clean_error(exc),
+                checked_at=record.checked_now(),
+            )
+            LOGGER.exception("Unexpected Apollo enrichment failure")
+        finally:
+            csv_service.save()
+
+        if position < len(indices):
+            await asyncio.sleep(settings.delay_between_companies_seconds)
+
+
+async def automate_indices(
+    csv_service: CSVService,
+    indices: list[int],
+    settings: Settings,
+) -> int:
+    """Run ServiceNow checks using only previously checkpointed enrichment."""
+
+    ready: list[int] = []
+    for index in indices:
+        try:
+            record = csv_service.record(index)
+            normalize_country(record.country_code)
+        except (ValidationError, ValueError, CountryNormalizationError):
+            LOGGER.warning("Skipping row %d because it has not been enriched", index + 2)
+            continue
+        ready.append(index)
+    if not ready:
+        LOGGER.error("No enriched rows are ready. Run the enrichment stage first.")
+        return 2
 
     async with async_playwright() as playwright:
         try:
@@ -119,21 +201,10 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
             result_selectors=settings.result_selectors,
         )
 
-        for position, index in enumerate(indices, start=1):
-            try:
-                record = csv_service.record(index)
-            except (ValidationError, ValueError) as exc:
-                csv_service.update(
-                    index,
-                    servicenow_customer="Unknown",
-                    check_status=CheckStatus.ERROR,
-                    error_message=clean_error(exc),
-                )
-                csv_service.save()
-                LOGGER.error("[%d/%d] Invalid CSV row: %s", position, len(indices), clean_error(exc))
-                continue
-
-            LOGGER.info("[%d/%d] %s", position, len(indices), record.company_name)
+        for position, index in enumerate(ready, start=1):
+            record = csv_service.record(index)
+            country_code = normalize_country(record.country_code)
+            LOGGER.info("[%d/%d] %s", position, len(ready), record.company_name)
             try:
                 await checker.assert_session_active()
             except SessionExpiredError as exc:
@@ -147,52 +218,6 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
                 csv_service.save()
                 LOGGER.error("%s", clean_error(exc))
                 return 4
-
-            try:
-                headquarters, country, country_code, apollo_name = await enrich_or_override(
-                    record, apollo
-                )
-                csv_service.update(
-                    index,
-                    headquarters=headquarters,
-                    country=country,
-                    country_code=country_code,
-                    apollo_company_name=apollo_name,
-                    servicenow_customer="",
-                    servicenow_matched_name="",
-                    match_score="",
-                    check_status=CheckStatus.APOLLO_SUCCESS,
-                    error_message="",
-                    checked_at="",
-                )
-                csv_service.save()
-            except (ApolloError, CountryNormalizationError) as exc:
-                csv_service.update(
-                    index,
-                    servicenow_customer="Unknown",
-                    check_status=CheckStatus.APOLLO_FAILED,
-                    error_message=clean_error(exc),
-                    checked_at=record.checked_now(),
-                )
-                csv_service.save()
-                LOGGER.error("Apollo enrichment failed: %s", clean_error(exc))
-                LOGGER.info("CSV updated.")
-                if position < len(indices):
-                    await asyncio.sleep(settings.delay_between_companies_seconds)
-                continue
-            except Exception as exc:
-                csv_service.update(
-                    index,
-                    servicenow_customer="Unknown",
-                    check_status=CheckStatus.APOLLO_FAILED,
-                    error_message=clean_error(exc),
-                    checked_at=record.checked_now(),
-                )
-                csv_service.save()
-                LOGGER.exception("Unexpected Apollo enrichment failure")
-                if position < len(indices):
-                    await asyncio.sleep(settings.delay_between_companies_seconds)
-                continue
 
             csv_service.update(index, check_status=CheckStatus.SEARCHING)
             csv_service.save()
@@ -244,12 +269,12 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
                     checked_at=record.checked_now(),
                 )
                 LOGGER.error("ServiceNow automation failed: %s", clean_error(exc))
-            except Exception as exc:
+            except Exception:
                 csv_service.update(
                     index,
                     servicenow_customer="Unknown",
                     check_status=CheckStatus.ERROR,
-                    error_message=clean_error(exc),
+                    error_message="Unexpected ServiceNow automation failure",
                     checked_at=record.checked_now(),
                 )
                 LOGGER.exception("Unexpected company-processing failure")
@@ -258,12 +283,33 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
                 LOGGER.info("CSV updated: %s", settings.output_csv)
                 LOGGER.info("%s", "-" * 50)
 
-            if position < len(indices):
+            if position < len(ready):
                 await asyncio.sleep(settings.delay_between_companies_seconds)
 
         # Do not call browser.close(): this is the user's externally managed Chrome.
-        LOGGER.info("Finished %d company row(s). Existing Chrome was left open.", len(indices))
+        LOGGER.info("Finished %d company row(s). Existing Chrome was left open.", len(ready))
         return 0
+
+
+async def run(args: argparse.Namespace, settings: Settings) -> int:
+    csv_service = CSVService(settings.input_csv, settings.output_csv)
+    indices = csv_service.selected_indices(
+        force=args.force, company=args.company, limit=args.limit
+    )
+    if args.company and not indices:
+        LOGGER.error("No eligible CSV row matched --company %r", args.company)
+        return 2
+    if not indices:
+        LOGGER.info("No pending companies to process. Use --force to recheck completed rows.")
+        return 0
+
+    LOGGER.info("Preparing to process %d company row(s)", len(indices))
+    if not args.automation_only:
+        await enrich_indices(csv_service, indices, settings)
+        if args.enrich_only:
+            LOGGER.info("Enrichment stage finished without opening a browser.")
+            return 0
+    return await automate_indices(csv_service, indices, settings)
 
 
 def main() -> int:

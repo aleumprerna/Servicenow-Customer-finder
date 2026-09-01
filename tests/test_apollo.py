@@ -8,6 +8,7 @@ import requests
 
 from clients.apollo import (
     ApolloClient,
+    ApolloCurrentCompanyUnavailableError,
     ApolloNoMatchError,
     linkedin_profile_matches,
     normalize_url,
@@ -56,6 +57,10 @@ def test_linkedin_url_normalization() -> None:
     assert linkedin_profile_matches(
         "https://linkedin.com/in/prakhar-s-42bbb310a",
         "https://linkedin.com/in/prakhar-singh-42bbb310a",
+    )
+    assert linkedin_profile_matches(
+        "https://linkedin.com/in/regitze-reeh",
+        "https://linkedin.com/in/regitze-reeh-899193",
     )
 
 
@@ -139,8 +144,17 @@ def test_person_company_uses_person_linkedin_url_and_returns_organization_identi
                 200,
                 {"person": {
                     "linkedin_url": "https://www.linkedin.com/in/ada-lovelace",
-                    "organization": {"name": "Adobe", "primary_domain": "adobe.com",
-                    "linkedin_url": "https://www.linkedin.com/company/adobe/"}}},
+                    "headline": "Engineer at Adobe",
+                    "organization_id": "org-1",
+                    "organization": {"id": "org-1", "name": "Adobe", "primary_domain": "adobe.com",
+                    "linkedin_url": "https://www.linkedin.com/company/adobe/"},
+                    "employment_history": [{
+                        "current": True,
+                        "organization_id": "org-1",
+                        "organization_name": "Adobe",
+                        "title": "Engineer",
+                        "start_date": "2024-01-01",
+                    }] }},
             )
         ]
     )
@@ -148,6 +162,10 @@ def test_person_company_uses_person_linkedin_url_and_returns_organization_identi
     assert result.name == "Adobe"
     assert result.domain == "adobe.com"
     assert result.linkedin_url == "https://linkedin.com/company/adobe"
+    assert result.organization_id == "org-1"
+    assert result.person_headline == "Engineer at Adobe"
+    assert result.current_employments[0].organization_name == "Adobe"
+    assert result.current_employments[0].start_date == "2024-01-01"
     assert session.calls[0][2]["params"]["linkedin_url"] == "https://linkedin.com/in/ada-lovelace"
 
 
@@ -199,6 +217,32 @@ def test_person_company_fetches_complete_record_when_match_is_partial() -> None:
     assert result.domain == "complete.test"
     assert session.calls[1][0] == "GET"
     assert session.calls[1][1].endswith("/people/person-1")
+
+
+def test_person_company_reports_matched_person_without_current_employer() -> None:
+    session = FakeSession(
+        [
+            response(200, {"person": {
+                "id": "person-1",
+                "name": "Raymond Moore",
+                "linkedin_url": "https://linkedin.com/in/raymond-moore-901b7551",
+                "organization_id": None,
+            }}),
+            response(200, {"person": {
+                "id": "person-1",
+                "name": "Raymond Moore",
+                "linkedin_url": "https://linkedin.com/in/raymond-moore-901b7551",
+                "organization_id": None,
+                "employment_history": [
+                    {"organization_name": "Past Company", "current": False}
+                ],
+            }}),
+        ]
+    )
+    with pytest.raises(ApolloCurrentCompanyUnavailableError, match="organization_id is empty"):
+        client(session).person_company(
+            "https://linkedin.com/in/raymond-moore-901b7551", "Raymond Moore"
+        )
 
 
 def test_unrelated_organizations_are_rejected() -> None:

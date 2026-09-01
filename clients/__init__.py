@@ -1,3 +1,15 @@
-from clients.apollo import ApolloClient, ApolloError, ApolloNoMatchError
+from clients.apollo import (
+    ApolloClient,
+    ApolloCurrentCompanyUnavailableError,
+    ApolloError,
+    ApolloNoMatchError,
+    CurrentEmploymentEvidence,
+)
 
-__all__ = ["ApolloClient", "ApolloError", "ApolloNoMatchError"]
+__all__ = [
+    "ApolloClient",
+    "ApolloCurrentCompanyUnavailableError",
+    "ApolloError",
+    "ApolloNoMatchError",
+    "CurrentEmploymentEvidence",
+]

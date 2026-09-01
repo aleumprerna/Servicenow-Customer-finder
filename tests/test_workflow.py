@@ -1,6 +1,10 @@
 from pathlib import Path
 
-from clients.apollo import PersonOrganization
+from clients.apollo import (
+    ApolloCurrentCompanyUnavailableError,
+    CurrentEmploymentEvidence,
+    PersonOrganization,
+)
 from workflow.database import WorkflowDatabase
 from workflow.person_company import PersonCompanyResolver
 from workflow.service import build_pipeline_csv, parse_people_csv, sync_pipeline_results
@@ -26,6 +30,14 @@ def test_uploaded_linkedin_export_is_normalized() -> None:
     ]
 
 
+def test_headline_current_role_header_is_recognized() -> None:
+    people = parse_people_csv(
+        b"Person Name,LinkedIn Profile URL,Headline / Current Role\n"
+        b"Regitze Reeh,https://linkedin.com/in/regitze-reeh,Head of Corporate Affairs at Harbour Energy\n"
+    )
+    assert people[0]["headline"] == "Head of Corporate Affairs at Harbour Energy"
+
+
 class FakeApollo:
     def person_company(self, linkedin_url: str, person_name: str) -> PersonOrganization:
         assert linkedin_url == "https://linkedin.com/in/ada"
@@ -33,6 +45,14 @@ class FakeApollo:
         return PersonOrganization(
             name="Apollo Organization", domain="apollo.io",
             linkedin_url="https://linkedin.com/company/apolloio",
+            organization_id="org-1",
+            current_employments=(
+                CurrentEmploymentEvidence(
+                    organization_id="org-1",
+                    organization_name="Apollo Organization",
+                    start_date="2024-01-01",
+                ),
+            ),
         )
 
 
@@ -44,6 +64,14 @@ class ChangedProfileApollo:
             person_name="Prakhar Singh",
             person_linkedin_url="https://linkedin.com/in/prakhar-singh",
             profile_matched=False,
+            organization_id="org-1",
+            current_employments=(
+                CurrentEmploymentEvidence(
+                    organization_id="org-1",
+                    organization_name="Tech Mahindra",
+                    start_date="2024-01-01",
+                ),
+            ),
         )
 
 
@@ -54,7 +82,7 @@ def test_company_resolver_uses_verified_apollo_person_profile() -> None:
         supplied_company_name="Provided Ltd", headline="Engineer at Apollo Organization",
     )
     assert result.company_name == "Apollo Organization"
-    assert result.status == "apollo_verified"
+    assert result.status == "apollo_cross_verified"
     assert result.domain == "apollo.io"
     assert result.company_linkedin_url == "https://linkedin.com/company/apolloio"
 
@@ -112,7 +140,7 @@ def test_build_pipeline_csv_replaces_stale_checkpoint(
     )
     person = database.people_for_run(run_id)[0]
     database.update_person_resolution(
-        person["id"], company_name="Example Corp", status="apollo_verified",
+        person["id"], company_name="Example Corp", status="apollo_cross_verified",
         domain="example.com", company_linkedin_url="https://linkedin.com/company/example",
     )
     monkeypatch.setattr("workflow.service.RUNS_DIR", tmp_path / "runs")
@@ -138,7 +166,7 @@ def test_explicit_headline_employer_wins_over_stale_apollo_company() -> None:
     )
     assert result.status == "linkedin_headline_verified"
     assert result.company_name == "Completely Different Ltd"
-    assert "conflicting" in result.error
+    assert "weak/stale" in result.error
 
 
 def test_changed_profile_is_cross_verified_by_name_and_headline() -> None:
@@ -163,3 +191,143 @@ def test_changed_profile_without_two_confirmations_is_blocked() -> None:
     )
     assert result.status == "apollo_profile_conflict"
     assert result.company_name == ""
+
+
+class ApolloWithoutCurrentCompany:
+    def person_company(self, linkedin_url: str, person_name: str) -> PersonOrganization:
+        raise ApolloCurrentCompanyUnavailableError(
+            "Apollo matched 'Raymond Moore' but organization_id is empty"
+        )
+
+
+def test_apollo_only_company_requires_manual_confirmation() -> None:
+    resolver = PersonCompanyResolver(FakeApollo())  # type: ignore[arg-type]
+    result = resolver.resolve(
+        person_name="Ada", linkedin_url="https://linkedin.com/in/ada",
+        supplied_company_name="", headline="Engineer",
+    )
+    assert result.status == "apollo_reported_current"
+    assert result.company_name == "Apollo Organization"
+    assert "confirm it before use" in result.error
+
+
+def test_matched_person_without_current_company_has_specific_status() -> None:
+    resolver = PersonCompanyResolver(ApolloWithoutCurrentCompany())  # type: ignore[arg-type]
+    result = resolver.resolve(
+        person_name="Raymond Moore",
+        linkedin_url="https://linkedin.com/in/raymond-moore-901b7551",
+        supplied_company_name="",
+        headline="",
+    )
+    assert result.status == "apollo_current_company_unavailable"
+    assert result.company_name == ""
+    assert "organization_id is empty" in result.error
+
+
+def test_supplied_company_conflict_requires_manual_confirmation() -> None:
+    resolver = PersonCompanyResolver(FakeApollo())  # type: ignore[arg-type]
+    result = resolver.resolve(
+        person_name="Ada", linkedin_url="https://linkedin.com/in/ada",
+        supplied_company_name="Actual Company", headline="",
+    )
+    assert result.status == "apollo_company_conflict"
+    assert result.company_name == "Actual Company"
+    assert "manual confirmation" in result.error
+
+
+class RegitzeLikeApollo:
+    def person_company(self, linkedin_url: str, person_name: str) -> PersonOrganization:
+        return PersonOrganization(
+            name="Xellia Pharmaceuticals",
+            organization_id="xellia-id",
+            current_employments=(
+                CurrentEmploymentEvidence(
+                    organization_id="xellia-id",
+                    title="Vice President Corporate Communications & Public Affairs",
+                ),
+            ),
+        )
+
+
+def test_regitze_like_stale_apollo_company_is_rejected() -> None:
+    resolver = PersonCompanyResolver(RegitzeLikeApollo())  # type: ignore[arg-type]
+    result = resolver.resolve(
+        person_name="Regitze Reeh",
+        linkedin_url="https://linkedin.com/in/regitze-reeh",
+        supplied_company_name="",
+        headline="Head of Corporate Affairs at Harbour Energy",
+    )
+    assert result.status == "linkedin_headline_verified"
+    assert result.company_name == "Harbour Energy"
+    assert "Rejected weak/stale Apollo company 'Xellia Pharmaceuticals'" in result.error
+
+
+class IreneuszLikeApollo:
+    def person_company(self, linkedin_url: str, person_name: str) -> PersonOrganization:
+        return PersonOrganization(
+            name="ORLEN S.A.",
+            domain="orlen.pl",
+            organization_id="orlen-id",
+            person_headline="Prezes Zarzadu w Orlen S.A.",
+            current_employments=(
+                CurrentEmploymentEvidence(
+                    organization_id="orlen-id",
+                    organization_name="ORLEN S.A.",
+                    title="Chief Executive Officer",
+                    start_date="2024-04-01",
+                ),
+            ),
+        )
+
+
+def test_named_dated_current_role_is_cross_verified() -> None:
+    resolver = PersonCompanyResolver(IreneuszLikeApollo())  # type: ignore[arg-type]
+    result = resolver.resolve(
+        person_name="Ireneusz Fafara",
+        linkedin_url="https://linkedin.com/in/ireneusz-fafara",
+        supplied_company_name="",
+        headline="President of the Management Board / CEO at ORLEN S.A.",
+    )
+    assert result.status == "apollo_cross_verified"
+    assert result.company_name == "ORLEN S.A."
+    assert result.error == ""
+
+
+def test_former_role_is_sent_to_manual_review() -> None:
+    apollo = IreneuszLikeApollo()
+    resolver = PersonCompanyResolver(apollo)  # type: ignore[arg-type]
+    result = resolver.resolve(
+        person_name="Ireneusz Fafara",
+        linkedin_url="https://linkedin.com/in/ireneusz-fafara",
+        supplied_company_name="",
+        headline="Former Chief Executive Officer at ORLEN S.A.",
+    )
+    assert result.status == "apollo_former_role_review"
+    assert "manual review" in result.error
+
+
+class AtulLikeApollo:
+    def person_company(self, linkedin_url: str, person_name: str) -> PersonOrganization:
+        return PersonOrganization(
+            name="SKF ISEAM",
+            organization_id="skf-id",
+            current_employments=(
+                CurrentEmploymentEvidence(
+                    organization_id="skf-id",
+                    organization_name="SKF India Limited",
+                    start_date="2000-12-01",
+                ),
+            ),
+        )
+
+
+def test_matching_organization_id_allows_current_company_name_alias() -> None:
+    resolver = PersonCompanyResolver(AtulLikeApollo())  # type: ignore[arg-type]
+    result = resolver.resolve(
+        person_name="Atul Dharap",
+        linkedin_url="https://linkedin.com/in/atul-dharap",
+        supplied_company_name="",
+        headline="Safety, Health & Environment Manager at SKF India Ltd.",
+    )
+    assert result.status == "apollo_cross_verified"
+    assert result.company_name == "SKF ISEAM"

@@ -6,12 +6,13 @@ This application enriches companies with Apollo headquarters data, attaches Play
 
 The project also includes a local web UI that adds a full workflow around the existing scraper:
 
-1. Upload a CSV of people containing a name and LinkedIn profile URL. The LinkedIn export headings `Name`, `Profile URL`, and `Headline` are supported directly.
-2. The app sends each person's LinkedIn profile URL to Apollo People Match and uses the returned current organization name, domain, and organization LinkedIn URL. It does **not** guess from a headline or scrape a logged-in LinkedIn profile.
-3. Click **Run instance**. It opens the ServiceNow deployment-registration URL in a Chrome remote-debugging profile. Log in and wait until the Customer Information form is visible.
-4. Click **Start collection**. The app creates a per-run CSV, runs the existing `main.py --force` pipeline, and stores all ServiceNow results in `data/workflow.db` (SQLite).
-5. Every completed ServiceNow result with `servicenow_customer=No` is POSTed individually to n8n. `Yes`, `Unknown`, and technical failures are never sent.
-6. **Reports** in the UI joins the original person, company resolution, ServiceNow result, and n8n result. You can download the selected run as CSV.
+1. Upload a CSV of people containing a name and LinkedIn profile URL. The LinkedIn export headings `Name`, `Profile URL`, `Headline`, and `Headline / Current Role` are supported directly.
+2. The app sends each person's LinkedIn profile URL to Apollo People Match and reads the returned current organization, Apollo headline, and current-employment evidence. A company is cross-verified when a named, dated current job matches the primary organization and headline/company evidence corroborates it. Incomplete, conflicting, or “Former” records require review. The app does **not** scrape a logged-in LinkedIn profile.
+3. Click **Enrich records**. The app resolves confirmed employers and runs Apollo organization enrichment without opening a browser.
+4. Click **Run instance**. It opens the ServiceNow deployment-registration URL in a Chrome remote-debugging profile. Log in and wait until the Customer Information form is visible.
+5. Click **Start web automation** after logging into ServiceNow. The app uses the saved enrichment, runs browser automation without Apollo calls, and stores the results in `data/workflow.db` (SQLite).
+6. Every completed ServiceNow result with `servicenow_customer=No` is POSTed individually to n8n. `Yes`, `Unknown`, and technical failures are never sent.
+7. **Reports** in the UI joins the original person, company resolution, ServiceNow result, and n8n result. You can download the selected run as CSV.
 
 SQLite is used by default because it requires no server or credentials. It is a local database file; moving to MySQL later only requires replacing the `WorkflowDatabase` repository layer.
 
@@ -55,7 +56,7 @@ pip install -r requirements.txt
 python -m uvicorn app:app --host 127.0.0.1 --port 8000
 ```
 
-Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Upload your CSV, click **Run instance**, complete the ServiceNow login in the Chrome window that opens, then click **Start collection**. Keep the UI server and Chrome window open until the run completes.
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Upload your CSV and click **Enrich records**. Then click **Run instance**, complete the ServiceNow login in the Chrome window that opens, and click **Start web automation**. Keep the UI server and Chrome window open until automation completes.
 
 The original standalone command remains available if you only want to run a company CSV directly:
 

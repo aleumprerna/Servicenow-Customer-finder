@@ -26,6 +26,19 @@ class ApolloNoMatchError(ApolloError):
     pass
 
 
+class ApolloCurrentCompanyUnavailableError(ApolloNoMatchError):
+    """Apollo matched the person but did not expose a current employer."""
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentEmploymentEvidence:
+    organization_id: str = ""
+    organization_name: str = ""
+    title: str = ""
+    start_date: str = ""
+    end_date: str = ""
+
+
 @dataclass(frozen=True, slots=True)
 class PersonOrganization:
     """Current employer identifiers returned by Apollo People Match."""
@@ -36,6 +49,9 @@ class PersonOrganization:
     person_name: str = ""
     person_linkedin_url: str = ""
     profile_matched: bool = True
+    organization_id: str = ""
+    person_headline: str = ""
+    current_employments: tuple[CurrentEmploymentEvidence, ...] = ()
 
 
 def linkedin_profile_matches(expected: str, returned: str) -> bool:
@@ -47,6 +63,18 @@ def linkedin_profile_matches(expected: str, returned: str) -> bool:
         return True
     expected_slug = urlsplit(expected_url).path.strip("/").split("/")[-1]
     returned_slug = urlsplit(returned_url).path.strip("/").split("/")[-1]
+    # LinkedIn may redirect an older vanity URL to a canonical slug with a
+    # numeric uniqueness suffix (for example, regitze-reeh ->
+    # regitze-reeh-899193). Treat that as the same profile identity. Employer
+    # freshness is evaluated separately and must not depend on the vanity slug.
+    for shorter, longer in (
+        (expected_slug, returned_slug),
+        (returned_slug, expected_slug),
+    ):
+        prefix = f"{shorter}-"
+        suffix = longer.removeprefix(prefix)
+        if longer.startswith(prefix) and suffix.isdigit() and len(suffix) >= 5:
+            return True
     # LinkedIn vanity names can change while the profile's generated suffix is
     # retained (for example, name-initial-42bbb310a -> full-name-42bbb310a).
     expected_suffix = expected_slug.rsplit("-", 1)[-1]
@@ -210,6 +238,12 @@ class ApolloClient:
         profile_matched = linkedin_profile_matches(normalized, returned_profile)
 
         def with_person_evidence(company: PersonOrganization) -> PersonOrganization:
+            primary = person.get("organization")
+            primary_id = str(
+                person.get("organization_id")
+                or (primary.get("id") if isinstance(primary, dict) else "")
+                or ""
+            ).strip()
             return PersonOrganization(
                 name=company.name,
                 domain=company.domain,
@@ -217,13 +251,16 @@ class ApolloClient:
                 person_name=str(person.get("name") or "").strip(),
                 person_linkedin_url=normalize_url(returned_profile),
                 profile_matched=profile_matched,
+                organization_id=primary_id,
+                person_headline=str(person.get("headline") or "").strip(),
+                current_employments=self._current_employment_evidence(person),
             )
 
         try:
             company = self._select_current_organization(person)
-        except ApolloNoMatchError as initial_error:
+        except ApolloCurrentCompanyUnavailableError as initial_error:
             person_id = str(person.get("id") or "").strip()
-            if "did not return a current organization" not in str(initial_error) or not person_id:
+            if not person_id:
                 raise
             # People Match can identify the person while returning a partial
             # record. Apollo's complete-person endpoint supplies employment
@@ -239,9 +276,58 @@ class ApolloClient:
             person = complete_person
             returned_profile = str(person.get("linkedin_url") or returned_profile)
             profile_matched = linkedin_profile_matches(normalized, returned_profile)
-            company = self._select_current_organization(person)
+            try:
+                company = self._select_current_organization(person)
+            except ApolloCurrentCompanyUnavailableError:
+                matched_name = str(person.get("name") or person_name or "the person").strip()
+                organization_id = str(person.get("organization_id") or "").strip()
+                history = person.get("employment_history")
+                current_jobs = [
+                    item
+                    for item in history
+                    if isinstance(item, dict) and item.get("current") is True
+                ] if isinstance(history, list) else []
+                issues: list[str] = []
+                if not organization_id:
+                    issues.append("organization_id is empty")
+                if not current_jobs:
+                    issues.append("no employment history entry is marked current")
+                else:
+                    issues.append("current employment entries contain no usable organization")
+                raise ApolloCurrentCompanyUnavailableError(
+                    f"Apollo matched {matched_name!r} (person ID {person_id}) but its public "
+                    f"API returned no current organization: {'; '.join(issues)}"
+                ) from initial_error
 
         return with_person_evidence(company)
+
+    @staticmethod
+    def _current_employment_evidence(
+        person: dict[str, Any],
+    ) -> tuple[CurrentEmploymentEvidence, ...]:
+        history = person.get("employment_history")
+        if not isinstance(history, list):
+            return ()
+        evidence: list[CurrentEmploymentEvidence] = []
+        for item in history:
+            if not isinstance(item, dict) or item.get("current") is not True:
+                continue
+            nested = item.get("organization")
+            organization = nested if isinstance(nested, dict) else {}
+            evidence.append(
+                CurrentEmploymentEvidence(
+                    organization_id=str(
+                        item.get("organization_id") or organization.get("id") or ""
+                    ).strip(),
+                    organization_name=str(
+                        item.get("organization_name") or organization.get("name") or ""
+                    ).strip(),
+                    title=str(item.get("title") or "").strip(),
+                    start_date=str(item.get("start_date") or "").strip(),
+                    end_date=str(item.get("end_date") or "").strip(),
+                )
+            )
+        return tuple(evidence)
 
     def _select_current_organization(self, person: dict[str, Any]) -> PersonOrganization:
         organization = person.get("organization")
@@ -279,7 +365,9 @@ class ApolloClient:
             raise ApolloNoMatchError(
                 "Apollo returned multiple current organizations and no reliable primary employer"
             )
-        raise ApolloNoMatchError("Apollo did not return a current organization")
+        raise ApolloCurrentCompanyUnavailableError(
+            "Apollo matched the person but did not return a current organization"
+        )
 
     @staticmethod
     def _person_organization(value: dict[str, Any]) -> PersonOrganization | None:

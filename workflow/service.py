@@ -21,7 +21,6 @@ from workflow.person_company import PersonCompanyResolver
 
 RUNS_DIR = PROJECT_ROOT / "data" / "runs"
 TRUSTED_COMPANY_STATUSES = {
-    "apollo_verified",
     "apollo_cross_verified",
     "linkedin_headline_verified",
     "manual_verified",
@@ -50,7 +49,7 @@ def parse_people_csv(raw: bytes) -> list[dict[str, Any]]:
     person_key = find("personname", "name", "fullname")
     linkedin_key = find("linkedinurl", "profileurl", "linkedinprofileurl", "profile")
     company_key = find("companyname", "company", "organization", "employer")
-    headline_key = find("headline", "title")
+    headline_key = find("headline", "headlinecurrentrole", "currentrole", "title")
     if not person_key or not linkedin_key:
         raise ValueError(
             "CSV needs person name and LinkedIn URL columns (for example: Name, Profile URL)"
@@ -231,37 +230,93 @@ def send_negatives_to_n8n(database: WorkflowDatabase, run_id: int, settings: Set
         return sum(executor.map(deliver, checks))
 
 
-def run_collection(database: WorkflowDatabase, run_id: int) -> None:
-    """Run in FastAPI's background task after the user has logged into Chrome."""
+def _pipeline_process(
+    *, input_path: Path, output_path: Path, stage: str
+) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment["INPUT_CSV"] = str(input_path)
+    environment["OUTPUT_CSV"] = str(output_path)
+    environment["DEBUG_DIR"] = str(input_path.parent / "debug")
+    environment["SAVE_SCREENSHOTS"] = "true"
+    venv_python = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
+    python_executable = str(venv_python) if venv_python.is_file() else sys.executable
+    return subprocess.run(
+        [python_executable, "main.py", "--force", stage],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
+def run_enrichment(database: WorkflowDatabase, run_id: int) -> None:
+    """Resolve people and enrich organizations without starting browser automation."""
 
     try:
         settings = load_settings()
-        database.update_run(run_id, status="collecting", started_at=now(), collection_log="")
+        database.update_run(run_id, status="enriching", started_at=now(), collection_log="")
         input_path, output_path, resolved_count = build_pipeline_csv(database, run_id, settings)
         if not resolved_count:
             database.update_run(
                 run_id,
                 status="needs_attention",
                 finished_at=now(),
-                collection_log="No company could be resolved from the uploaded people.",
+                collection_log=(
+                    "No confirmed company is ready for organization enrichment. "
+                    "Review Apollo-only/conflicting rows and confirm the correct company."
+                ),
             )
             return
 
-        environment = os.environ.copy()
-        environment["INPUT_CSV"] = str(input_path)
-        environment["OUTPUT_CSV"] = str(output_path)
-        environment["DEBUG_DIR"] = str(input_path.parent / "debug")
-        environment["SAVE_SCREENSHOTS"] = "true"
-        venv_python = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
-        python_executable = str(venv_python) if venv_python.is_file() else sys.executable
-        process = subprocess.run(
-            [python_executable, "main.py", "--force"],
-            cwd=PROJECT_ROOT,
-            env=environment,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+        process = _pipeline_process(
+            input_path=input_path,
+            output_path=output_path,
+            stage="--enrich-only",
+        )
+        synced_count = sync_pipeline_results(database, run_id, output_path)
+        report_rows = database.report_rows(run_id)
+        enriched_count = sum(
+            row["check_status"] == "apollo_success" for row in report_rows
+        )
+        status = "enriched" if process.returncode == 0 and enriched_count else "needs_attention"
+        log = (process.stdout + "\n" + process.stderr).strip()[-20_000:]
+        database.update_run(
+            run_id,
+            status=status,
+            finished_at=now(),
+            collection_log=(
+                f"Company resolution ready {resolved_count}; Apollo organization enrichment "
+                f"completed {enriched_count}; synced {synced_count}.\n{log}"
+            ),
+        )
+    except Exception as exc:
+        database.update_run(run_id, status="failed", finished_at=now(), collection_log=str(exc))
+
+
+def run_collection(database: WorkflowDatabase, run_id: int) -> None:
+    """Run only ServiceNow browser automation against enriched records."""
+
+    try:
+        settings = load_settings()
+        database.update_run(run_id, status="collecting", started_at=now(), collection_log="")
+        run_dir = RUNS_DIR / str(run_id)
+        input_path = run_dir / "companies.csv"
+        output_path = run_dir / "companies_checked.csv"
+        if not output_path.exists():
+            database.update_run(
+                run_id,
+                status="needs_attention",
+                finished_at=now(),
+                collection_log="No enriched records found. Click Enrich records first.",
+            )
+            return
+
+        process = _pipeline_process(
+            input_path=input_path,
+            output_path=output_path,
+            stage="--automation-only",
         )
         sync_count = sync_pipeline_results(database, run_id, output_path)
         sent_count = send_negatives_to_n8n(database, run_id, settings)
@@ -269,9 +324,16 @@ def run_collection(database: WorkflowDatabase, run_id: int) -> None:
         report_rows = database.report_rows(run_id)
         completed_checks = sum(row["check_status"] == "completed" for row in report_rows)
         people_count = len(report_rows)
+        resolved_count = sum(
+            bool(str(row["company_name"] or "").strip())
+            and row["resolution_status"] in TRUSTED_COMPANY_STATUSES
+            for row in report_rows
+        )
         status = (
             "completed"
-            if process.returncode == 0 and people_count > 0 and completed_checks == people_count
+            if process.returncode == 0
+            and resolved_count == people_count
+            and completed_checks == resolved_count
             else "needs_attention"
         )
         summary = (

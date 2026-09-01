@@ -16,9 +16,11 @@ from config import PROJECT_ROOT, load_settings
 from workflow.database import WorkflowDatabase
 from workflow.presentation import parse_n8n_evidence
 from workflow.service import (
+    TRUSTED_COMPANY_STATUSES,
     launch_chrome,
     parse_people_csv,
     run_collection,
+    run_enrichment,
     send_negatives_to_n8n,
 )
 
@@ -121,12 +123,7 @@ def _company_cell(row: dict[str, Any]) -> str:
     parts = [company, f"<br><small>{status}</small>"]
     if error:
         parts.append(f'<br><small class="resolution-error">{error}</small>')
-    if str(row.get("resolution_status") or "") not in {
-        "apollo_verified",
-        "apollo_cross_verified",
-        "linkedin_headline_verified",
-        "manual_verified",
-    }:
+    if str(row.get("resolution_status") or "") not in TRUSTED_COMPANY_STATUSES:
         parts.append(
             f'<form class="company-override" method="post" '
             f'action="/people/{int(row["person_id"])}/company">'
@@ -321,7 +318,7 @@ def _page(request: Request, selected_run: int | None = None) -> str:
     )
     attention_count = sum(
         str(row.get("check_status") or "").casefold() in {"error", "manual_review"}
-        or str(row.get("resolution_status") or "").casefold() in {"failed", "pending"}
+        or str(row.get("resolution_status") or "") not in TRUSTED_COMPANY_STATUSES
         for row in rows
     )
     report_stats = f"""
@@ -334,16 +331,23 @@ def _page(request: Request, selected_run: int | None = None) -> str:
     run_actions = ""
     run_log = ""
     if run:
+        busy = run["status"] in {"enriching", "collecting"}
+        disabled = "disabled" if busy else ""
         run_actions = f"""
-            <form method="post" action="/runs/{selected_run}/launch-browser"><button>1. Run instance</button></form>
-            <form method="post" action="/runs/{selected_run}/collect"><button class="primary" {'disabled' if run['status'] == 'collecting' else ''}>2. Start collection</button></form>
+            <form method="post" action="/runs/{selected_run}/enrich"><button class="primary" {disabled}>1. Enrich records</button></form>
+            <form method="post" action="/runs/{selected_run}/launch-browser"><button {disabled}>2. Run instance</button></form>
+            <form method="post" action="/runs/{selected_run}/collect"><button class="primary" {disabled}>3. Start web automation</button></form>
             <form method="post" action="/runs/{selected_run}/send-n8n"><button>Send/Retry No results to n8n</button></form>
             <a class="button" href="/reports.csv?run_id={selected_run}">Download report CSV</a>
         """
         if run["collection_log"]:
             run_log = f"<details><summary>Collection log</summary><pre>{_escape(run['collection_log'])}</pre></details>"
 
-    refresh = '<meta http-equiv="refresh" content="12">' if run and run["status"] == "collecting" else ""
+    refresh = (
+        '<meta http-equiv="refresh" content="12">'
+        if run and run["status"] in {"enriching", "collecting"}
+        else ""
+    )
     return f"""<!doctype html>
     <html><head><meta charset="utf-8">{refresh}<title>ServiceNow Partner Workflow</title>
     <style>
@@ -400,16 +404,16 @@ def _page(request: Request, selected_run: int | None = None) -> str:
       @media (max-width:520px) {{ body {{ padding:24px 10px 40px; }} section {{ border-radius:12px; padding:16px; }} .reports-section {{ padding:0; }} .report-card summary {{ padding:15px; gap:12px; }} .show-more, .show-less {{ display:none !important; }} dl > div {{ grid-template-columns:1fr; gap:3px; }} }}
     </style></head><body>
       <h1>ServiceNow Partner Workflow</h1>
-      <p class="muted">Upload people → log into ServiceNow → collect customer checks → send verified “No” results to n8n.</p>
+      <p class="muted">Upload people → enrich records → log into ServiceNow → run web automation → send verified “No” results to n8n.</p>
       {_message(request)}
       <section><h2>Upload people CSV</h2>
-        <p class="muted">Required headings: person name and LinkedIn URL. Your existing <code>Name</code> and <code>Profile URL</code> export works. Apollo resolves the current employer from the LinkedIn profile; headline text is stored only as report context.</p>
+        <p class="muted">Required headings: person name and LinkedIn URL. Your existing <code>Name</code> and <code>Profile URL</code> export works. Apollo reports a possible current employer; the app requires matching headline/company evidence or manual confirmation before using it.</p>
         <form method="post" action="/runs" enctype="multipart/form-data"><input type="file" name="file" accept=".csv,text/csv" required><button class="primary">Upload CSV</button></form>
       </section>
       <section><h2>Current run</h2>
         <form method="get" action="/"><select name="run_id" onchange="this.form.submit()">{options}</select></form>
         <div>{run_actions}</div>
-        <p class="muted">Run instance opens Chrome at the ServiceNow deployment-registration page. Log in and wait until the Customer Information form is visible before Start collection.</p>
+        <p class="muted">Enrich records runs Apollo API calls only. Run instance opens Chrome for manual ServiceNow login. Start web automation uses the saved enrichment and does not call Apollo.</p>
         {run_log}
       </section>
       <section><h2>Database maintenance</h2>
@@ -475,6 +479,7 @@ def set_company_override(
         status="manual_verified",
         error="Company supplied through dashboard override",
     )
+    DATABASE.update_run(run_id, status="needs_enrichment")
     return RedirectResponse(
         url=f"/?run_id={run_id}&message=Company+override+saved",
         status_code=303,
@@ -493,15 +498,37 @@ def open_browser(run_id: int) -> RedirectResponse:
     return RedirectResponse(url=f"/?run_id={run_id}&kind={kind}&message={message}", status_code=303)
 
 
+@app.post("/runs/{run_id}/enrich")
+def enrich(run_id: int, background_tasks: BackgroundTasks) -> RedirectResponse:
+    run = DATABASE.run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run["status"] in {"enriching", "collecting"}:
+        return RedirectResponse(
+            url=f"/?run_id={run_id}&message=This+run+is+already+busy", status_code=303
+        )
+    DATABASE.update_run(run_id, status="enriching")
+    background_tasks.add_task(run_enrichment, DATABASE, run_id)
+    return RedirectResponse(url=f"/?run_id={run_id}&message=Enrichment+started", status_code=303)
+
+
 @app.post("/runs/{run_id}/collect")
 def collect(run_id: int, background_tasks: BackgroundTasks) -> RedirectResponse:
     run = DATABASE.run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-    if run["status"] == "collecting":
-        return RedirectResponse(url=f"/?run_id={run_id}&message=Collection+is+already+running", status_code=303)
+    if run["status"] in {"enriching", "collecting"}:
+        return RedirectResponse(
+            url=f"/?run_id={run_id}&message=This+run+is+already+busy", status_code=303
+        )
+    if run["status"] in {"uploaded", "needs_enrichment"}:
+        return RedirectResponse(
+            url=f"/?run_id={run_id}&kind=error&message=Click+Enrich+records+first",
+            status_code=303,
+        )
+    DATABASE.update_run(run_id, status="collecting")
     background_tasks.add_task(run_collection, DATABASE, run_id)
-    return RedirectResponse(url=f"/?run_id={run_id}&message=Collection+started", status_code=303)
+    return RedirectResponse(url=f"/?run_id={run_id}&message=Web+automation+started", status_code=303)
 
 
 @app.post("/runs/{run_id}/send-n8n")
