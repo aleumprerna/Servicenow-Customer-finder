@@ -17,8 +17,8 @@ class Settings(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    apollo_api_key: str = Field(min_length=1)
-    apollo_base_url: str = "https://api.apollo.io/api/v1"
+    openai_api_key: str = Field(min_length=1)
+    openai_model: str = "gpt-5.4-mini"
     chrome_cdp_url: str = "http://localhost:9222"
     servicenow_username: str | None = None
     servicenow_password: str | None = None
@@ -29,11 +29,10 @@ class Settings(BaseModel):
     delay_between_companies_seconds: float = Field(default=2.0, ge=0)
     match_threshold: int = Field(default=85, ge=1, le=100)
     review_threshold: int = Field(default=70, ge=0, le=100)
-    apollo_match_threshold: int = Field(default=80, ge=1, le=100)
     save_screenshots: bool = False
     debug_dir: Path = Path("debug")
-    apollo_timeout_seconds: float = Field(default=20.0, gt=0)
-    apollo_max_retries: int = Field(default=3, ge=1, le=8)
+    openai_timeout_seconds: float = Field(default=45.0, gt=0)
+    openai_max_retries: int = Field(default=2, ge=0, le=8)
     result_selectors: tuple[str, ...] = ()
     n8n_webhook_url: str | None = None
     app_base_url: str = "http://localhost:8000"
@@ -94,8 +93,8 @@ def load_settings(env_file: Path | None = None) -> Settings:
         return str(value).strip() if value is not None else os.getenv(name, default).strip()
 
     data: dict[str, Any] = {
-        "apollo_api_key": os.getenv("APOLLO_API_KEY", "").strip(),
-        "apollo_base_url": os.getenv("APOLLO_BASE_URL", "https://api.apollo.io/api/v1").strip(),
+        "openai_api_key": os.getenv("OPENAI_API_KEY", "").strip(),
+        "openai_model": os.getenv("OPENAI_MODEL", "gpt-5.4-mini").strip(),
         "chrome_cdp_url": os.getenv("CHROME_CDP_URL", "http://localhost:9222").strip(),
         "servicenow_username": _optional("SERVICENOW_USERNAME"),
         "servicenow_password": _optional("SERVICENOW_PASSWORD"),
@@ -106,11 +105,10 @@ def load_settings(env_file: Path | None = None) -> Settings:
         "delay_between_companies_seconds": os.getenv("DELAY_BETWEEN_COMPANIES_SECONDS", "2"),
         "match_threshold": os.getenv("MATCH_THRESHOLD", "85"),
         "review_threshold": os.getenv("REVIEW_THRESHOLD", "70"),
-        "apollo_match_threshold": os.getenv("APOLLO_MATCH_THRESHOLD", "80"),
         "save_screenshots": _parse_bool("SAVE_SCREENSHOTS", True),
         "debug_dir": os.getenv("DEBUG_DIR", "debug"),
-        "apollo_timeout_seconds": os.getenv("APOLLO_TIMEOUT_SECONDS", "20"),
-        "apollo_max_retries": os.getenv("APOLLO_MAX_RETRIES", "3"),
+        "openai_timeout_seconds": os.getenv("OPENAI_TIMEOUT_SECONDS", "45"),
+        "openai_max_retries": os.getenv("OPENAI_MAX_RETRIES", "2"),
         "result_selectors": _parse_result_selectors(),
         "n8n_webhook_url": dynamic_value("N8N_WEBHOOK_URL") or None,
         "app_base_url": dynamic_value("APP_BASE_URL", "http://localhost:8000"),

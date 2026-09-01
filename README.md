@@ -1,13 +1,13 @@
 # ServiceNow Customer Checker
 
-This application enriches companies with Apollo headquarters data, attaches Playwright to an already-open and manually authenticated Chrome session, searches the ServiceNow Customer Information form, and checkpoints every result to CSV.
+This application uses an OpenAI lightweight model with built-in web search to resolve companies and headquarters, attaches Playwright to an already-open and manually authenticated Chrome session, searches the ServiceNow Customer Information form, and checkpoints every result to CSV.
 
 ## Local workflow UI: people → ServiceNow → n8n
 
 The project also includes a local web UI that adds a full workflow around the existing scraper:
 
 1. Upload a CSV of people containing a name and LinkedIn profile URL. The LinkedIn export headings `Name`, `Profile URL`, and `Headline` are supported directly.
-2. The app sends each person's LinkedIn profile URL to Apollo People Match and uses the returned current organization name, domain, and organization LinkedIn URL. It does **not** guess from a headline or scrape a logged-in LinkedIn profile.
+2. The app sends each person's name and LinkedIn profile URL to OpenAI web search and uses verified public sources to resolve the current organization name, domain, and organization LinkedIn URL. It does **not** scrape a logged-in LinkedIn profile.
 3. Click **Run instance**. It opens the ServiceNow deployment-registration URL in a Chrome remote-debugging profile. Log in and wait until the Customer Information form is visible.
 4. Click **Start collection**. The app creates a per-run CSV, runs the existing `main.py --force` pipeline, and stores all ServiceNow results in `data/workflow.db` (SQLite).
 5. Every completed ServiceNow result with `servicenow_customer=No` is POSTed individually to n8n. `Yes`, `Unknown`, and technical failures are never sent.
@@ -15,11 +15,11 @@ The project also includes a local web UI that adds a full workflow around the ex
 
 SQLite is used by default because it requires no server or credentials. It is a local database file; moving to MySQL later only requires replacing the `WorkflowDatabase` repository layer.
 
-Your Apollo API key needs access to both **People Match** (to resolve the employer from the person's LinkedIn profile) and **Organization Enrichment/Search** (to obtain the organization's headquarters country).
+Your OpenAI API key must have access to the Responses API and the configured model must support the built-in web search tool.
 
 ### Configure n8n
 
-Add these values to your existing `.env` file. Keep the existing Apollo and Chrome values too.
+Add these values to your existing `.env` file. Keep the existing Chrome values too.
 
 ```dotenv
 # The n8n production webhook that receives each verified ServiceNow "No" company.
@@ -32,7 +32,7 @@ APP_BASE_URL=http://localhost:8000
 N8N_CALLBACK_TOKEN=
 ```
 
-The outbound n8n payload contains `run_id`, `person_id`, `person_name`, `linkedin_url`, `company_name`, Apollo/ServiceNow fields, and `callback_url`. To return a final n8n result, make an HTTP POST to the provided `callback_url` with JSON such as:
+The outbound n8n payload contains `run_id`, `person_id`, `person_name`, `linkedin_url`, `company_name`, enrichment/ServiceNow fields, and `callback_url`. To return a final n8n result, make an HTTP POST to the provided `callback_url` with JSON such as:
 
 ```json
 {
@@ -70,7 +70,7 @@ It deliberately distinguishes a verified negative from a technical failure:
 | A strong matching result is returned | `Yes` | `completed` |
 | Search succeeds but no reasonable match exists | `No` | `completed` |
 | Best name score is ambiguous | `Unknown` | `manual_review` |
-| Apollo, browser, session, or automation fails | `Unknown` | `apollo_failed` or `error` |
+| Web search, browser, session, or automation fails | `Unknown` | `web_search_failed` or `error` |
 | Result HTML is not recognized | `Unknown` | `manual_review` |
 
 Technical uncertainty is never converted into `No`.
@@ -87,7 +87,7 @@ servicenow-customer-checker/
 ├── .gitignore
 ├── companies.csv
 ├── clients/
-│   └── apollo.py
+│   └── openai_web_search.py
 ├── browser/
 │   ├── connection.py
 │   └── servicenow.py
@@ -110,10 +110,10 @@ servicenow-customer-checker/
 - Windows 10/11
 - Python 3.11 or newer
 - Google Chrome
-- An Apollo API key with Organization Enrichment access; Organization Search access is needed for fallback matching
+- An OpenAI API key with Responses API access
 - Access to the ServiceNow portal and its Customer Information search form
 
-The Apollo integration uses the official [Organization Enrichment endpoint](https://docs.apollo.io/reference/organization-enrichment), passing LinkedIn URL and name together when available. If direct enrichment cannot be trusted, it uses [Organization Search](https://docs.apollo.io/reference/organization-search), ranks returned organizations by normalized name, LinkedIn URL, and optional domain, and rejects weak or tied matches.
+The OpenAI integration uses the Responses API with the built-in web search tool and strict structured output. It rejects low-confidence employer results, weak company-name matches, and unusable headquarters countries.
 
 ## Install on Windows
 
@@ -147,7 +147,8 @@ notepad .env
 At minimum, set:
 
 ```dotenv
-APOLLO_API_KEY=your_real_key
+OPENAI_API_KEY=your_real_key
+OPENAI_MODEL=gpt-5.4-mini
 CHROME_CDP_URL=http://localhost:9222
 INPUT_CSV=companies.csv
 OUTPUT_CSV=companies_checked.csv
@@ -180,8 +181,8 @@ Adobe,https://www.linkedin.com/company/adobe
 
 Optional input columns:
 
-- `domain`: strengthens Apollo matching.
-- `country_override`: bypasses Apollo country lookup for that row. It accepts values such as `US`, `United States`, or `US - United States`.
+- `domain`: strengthens web-search matching.
+- `country_override`: bypasses headquarters web search for that row. It accepts values such as `US`, `United States`, or `US - United States`.
 
 On first run, `OUTPUT_CSV` is created from `INPUT_CSV`. On later runs the output file is the resume source. Every state transition is written using an atomic temporary-file replacement, so completed work survives interruption.
 
@@ -192,6 +193,10 @@ company_name, linkedin_url, headquarters, country, country_code,
 apollo_company_name, servicenow_customer, servicenow_matched_name,
 match_score, check_status, error_message, checked_at
 ```
+
+`apollo_company_name` is retained as a legacy compatibility column for existing CSV,
+database, and n8n consumers. It now contains the company name returned by OpenAI web
+search; no Apollo API is called.
 
 Extra input columns are preserved. `checked_at` is UTC ISO 8601.
 
@@ -265,7 +270,7 @@ Enable detailed diagnostic logging:
 python main.py --limit 1 --verbose
 ```
 
-Normal mode skips only rows whose `check_status` is `completed`. Rows left at `searching`, `error`, `apollo_failed`, or `manual_review` are eligible on the next run. If the ServiceNow form disappears or the page redirects to login, processing stops immediately and all earlier checkpoints remain saved.
+Normal mode skips only rows whose `check_status` is `completed`. Rows left at `searching`, `error`, `web_search_failed`, or `manual_review` are eligible on the next run. If the ServiceNow form disappears or the page redirects to login, processing stops immediately and all earlier checkpoints remain saved.
 
 ## How the ServiceNow interaction works
 
@@ -282,7 +287,7 @@ For each row, the checker:
 9. Waits for a recognized result, explicit no-result message, technical error, or a stable but unknown DOM.
 10. Extracts every visible candidate and applies conservative fuzzy matching.
 
-ServiceNow browser automation gets one controlled retry for a temporary timeout/loading failure. Apollo retries only network timeouts, connection errors, HTTP 429, and HTTP 5xx responses with exponential backoff.
+ServiceNow browser automation gets one controlled retry for a temporary timeout/loading failure. The OpenAI SDK retries transient API failures according to `OPENAI_MAX_RETRIES`.
 
 ## Result selectors and HTML changes
 
@@ -344,9 +349,9 @@ Alternatively, update `DEFAULT_RESULT_SELECTORS` in `browser/servicenow.py`. Exp
 - Inspect the saved HTML and configure `SERVICENOW_RESULT_SELECTORS` as described above.
 - Ensure a selector identifies individual customer-name elements.
 
-**Apollo returns 401 or 403**
+**OpenAI returns an authentication or permission error**
 
-- Verify `APOLLO_API_KEY` and its endpoint scopes/plan access.
+- Verify `OPENAI_API_KEY`, project permissions, billing, and model access.
 - Secrets are sent only in the `x-api-key` header and are never logged.
 
 **Output CSV cannot be replaced**
@@ -362,4 +367,4 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-The tests cover country formats, conservative company-name matching, and CSV checkpoint/resume behavior. Live Apollo and ServiceNow calls are intentionally not part of the automated test suite because they require credentials and a manually prepared browser session.
+The tests cover structured web-search parsing, country formats, conservative company-name matching, and CSV checkpoint/resume behavior. Live OpenAI and ServiceNow calls are intentionally not part of the automated test suite because they require credentials and a manually prepared browser session.

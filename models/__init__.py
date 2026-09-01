@@ -1,3 +1,3 @@
-from models.company import ApolloCompany, CheckStatus, CompanyRecord, SearchResult
+from models.company import CompanyEnrichment, CheckStatus, CompanyRecord, SearchResult
 
-__all__ = ["ApolloCompany", "CheckStatus", "CompanyRecord", "SearchResult"]
+__all__ = ["CompanyEnrichment", "CheckStatus", "CompanyRecord", "SearchResult"]

@@ -1,6 +1,7 @@
 playwright>=1.49,<2
 pandas>=2.2,<4
 requests>=2.32,<3
+openai>=2.0,<3
 python-dotenv>=1.0,<2
 rapidfuzz>=3.10,<4
 pycountry>=24.6,<27

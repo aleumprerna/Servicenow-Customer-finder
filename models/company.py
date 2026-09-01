@@ -8,15 +8,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 class CheckStatus(StrEnum):
     PENDING = "pending"
-    APOLLO_SUCCESS = "apollo_success"
-    APOLLO_FAILED = "apollo_failed"
+    WEB_SEARCH_SUCCESS = "web_search_success"
+    WEB_SEARCH_FAILED = "web_search_failed"
     SEARCHING = "searching"
     COMPLETED = "completed"
     ERROR = "error"
     MANUAL_REVIEW = "manual_review"
 
 
-class ApolloCompany(BaseModel):
+class CompanyEnrichment(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     company_name: str

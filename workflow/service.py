@@ -13,7 +13,7 @@ from typing import Any
 
 import requests
 
-from clients.apollo import ApolloClient
+from clients.openai_web_search import OpenAIWebSearchClient
 from config import PROJECT_ROOT, Settings, load_settings
 from workflow.database import WorkflowDatabase, now
 from workflow.person_company import PersonCompanyResolver
@@ -21,6 +21,8 @@ from workflow.person_company import PersonCompanyResolver
 
 RUNS_DIR = PROJECT_ROOT / "data" / "runs"
 TRUSTED_COMPANY_STATUSES = {
+    "web_search_verified",
+    # Existing runs remain resumable after the migration.
     "apollo_verified",
     "apollo_cross_verified",
     "linkedin_headline_verified",
@@ -78,22 +80,21 @@ def parse_people_csv(raw: bytes) -> list[dict[str, Any]]:
     return people
 
 
-def _apollo(settings: Settings) -> ApolloClient:
-    return ApolloClient(
-        api_key=settings.apollo_api_key,
-        base_url=settings.apollo_base_url,
-        timeout_seconds=settings.apollo_timeout_seconds,
-        max_retries=settings.apollo_max_retries,
-        match_threshold=settings.apollo_match_threshold,
+def _web_search(settings: Settings) -> OpenAIWebSearchClient:
+    return OpenAIWebSearchClient(
+        api_key=settings.openai_api_key,
+        model=settings.openai_model,
+        timeout_seconds=settings.openai_timeout_seconds,
+        max_retries=settings.openai_max_retries,
     )
 
 
 def resolve_people(database: WorkflowDatabase, run_id: int, settings: Settings) -> list[dict[str, Any]]:
-    resolver = PersonCompanyResolver(_apollo(settings))
+    resolver = PersonCompanyResolver(_web_search(settings))
     people = database.people_for_run(run_id)
     for person in people:
         # Older runs stored headline guesses without organization identifiers.
-        # Refresh those, and any unresolved row, through Apollo People Match.
+        # Refresh older headline guesses and unresolved rows through web search.
         if person["resolution_status"] in TRUSTED_COMPANY_STATUSES:
             continue
         result = resolver.resolve(
@@ -122,7 +123,7 @@ def build_pipeline_csv(database: WorkflowDatabase, run_id: int, settings: Settin
     output_path = run_dir / "companies_checked.csv"
     # CSVService resumes from an existing output file. A UI collection is an
     # explicit fresh run, so remove the generated checkpoint first; otherwise
-    # newly resolved Apollo domains/organization URLs would never reach main.py.
+    # newly resolved domains/organization URLs would never reach main.py.
     output_path.unlink(missing_ok=True)
     fields = [
         "company_name", "linkedin_url", "source_person_id", "person_name",
@@ -132,8 +133,8 @@ def build_pipeline_csv(database: WorkflowDatabase, run_id: int, settings: Settin
         writer = csv.DictWriter(file, fieldnames=fields)
         writer.writeheader()
         for person in resolved:
-            # The personal profile is retained separately. Apollo's organization
-            # identifiers are the only values passed to organization enrichment.
+            # Retain the personal profile separately and pass researched organization
+            # identifiers to the headquarters enrichment step.
             writer.writerow(
                 {
                     "company_name": person["company_name"],

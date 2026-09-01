@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from clients.apollo import PersonOrganization
+from clients.openai_web_search import PersonOrganization
 from workflow.database import WorkflowDatabase
 from workflow.person_company import PersonCompanyResolver
 from workflow.service import build_pipeline_csv, parse_people_csv, sync_pipeline_results
@@ -26,37 +26,26 @@ def test_uploaded_linkedin_export_is_normalized() -> None:
     ]
 
 
-class FakeApollo:
+class FakeWebSearch:
     def person_company(self, linkedin_url: str, person_name: str) -> PersonOrganization:
         assert linkedin_url == "https://linkedin.com/in/ada"
         assert person_name == "Ada"
         return PersonOrganization(
-            name="Apollo Organization", domain="apollo.io",
-            linkedin_url="https://linkedin.com/company/apolloio",
+            name="Example Organization", domain="example.com",
+            linkedin_url="https://linkedin.com/company/example",
+            confidence=95,
         )
 
-
-class ChangedProfileApollo:
-    def person_company(self, linkedin_url: str, person_name: str) -> PersonOrganization:
-        return PersonOrganization(
-            name="Tech Mahindra",
-            domain="techmahindra.com",
-            person_name="Prakhar Singh",
-            person_linkedin_url="https://linkedin.com/in/prakhar-singh",
-            profile_matched=False,
-        )
-
-
-def test_company_resolver_uses_verified_apollo_person_profile() -> None:
-    resolver = PersonCompanyResolver(FakeApollo())  # type: ignore[arg-type]
+def test_company_resolver_uses_verified_web_search_result() -> None:
+    resolver = PersonCompanyResolver(FakeWebSearch())  # type: ignore[arg-type]
     result = resolver.resolve(
         person_name="Ada", linkedin_url="https://linkedin.com/in/ada",
-        supplied_company_name="Provided Ltd", headline="Engineer at Apollo Organization",
+        supplied_company_name="Provided Ltd", headline="Engineer at Example Organization",
     )
-    assert result.company_name == "Apollo Organization"
-    assert result.status == "apollo_verified"
-    assert result.domain == "apollo.io"
-    assert result.company_linkedin_url == "https://linkedin.com/company/apolloio"
+    assert result.company_name == "Example Organization"
+    assert result.status == "web_search_verified"
+    assert result.domain == "example.com"
+    assert result.company_linkedin_url == "https://linkedin.com/company/example"
 
 
 def test_pipeline_csv_sync_and_negative_filter(tmp_path: Path) -> None:
@@ -112,7 +101,7 @@ def test_build_pipeline_csv_replaces_stale_checkpoint(
     )
     person = database.people_for_run(run_id)[0]
     database.update_person_resolution(
-        person["id"], company_name="Example Corp", status="apollo_verified",
+        person["id"], company_name="Example Corp", status="web_search_verified",
         domain="example.com", company_linkedin_url="https://linkedin.com/company/example",
     )
     monkeypatch.setattr("workflow.service.RUNS_DIR", tmp_path / "runs")
@@ -130,8 +119,8 @@ def test_build_pipeline_csv_replaces_stale_checkpoint(
     assert "linkedin.com/company/example" in generated
 
 
-def test_explicit_headline_employer_wins_over_stale_apollo_company() -> None:
-    resolver = PersonCompanyResolver(FakeApollo())  # type: ignore[arg-type]
+def test_explicit_headline_employer_wins_over_conflicting_web_result() -> None:
+    resolver = PersonCompanyResolver(FakeWebSearch())  # type: ignore[arg-type]
     result = resolver.resolve(
         person_name="Ada", linkedin_url="https://linkedin.com/in/ada",
         supplied_company_name="", headline="Engineer at Completely Different Ltd",
@@ -139,27 +128,3 @@ def test_explicit_headline_employer_wins_over_stale_apollo_company() -> None:
     assert result.status == "linkedin_headline_verified"
     assert result.company_name == "Completely Different Ltd"
     assert "conflicting" in result.error
-
-
-def test_changed_profile_is_cross_verified_by_name_and_headline() -> None:
-    resolver = PersonCompanyResolver(ChangedProfileApollo())  # type: ignore[arg-type]
-    result = resolver.resolve(
-        person_name="Prakhar S.",
-        linkedin_url="https://linkedin.com/in/prakhar-s-old",
-        supplied_company_name="",
-        headline="Software Engineer@ Tech Mahindra|Python",
-    )
-    assert result.status == "apollo_cross_verified"
-    assert result.company_name == "Tech Mahindra"
-
-
-def test_changed_profile_without_two_confirmations_is_blocked() -> None:
-    resolver = PersonCompanyResolver(ChangedProfileApollo())  # type: ignore[arg-type]
-    result = resolver.resolve(
-        person_name="Different Person",
-        linkedin_url="https://linkedin.com/in/different-person",
-        supplied_company_name="",
-        headline="",
-    )
-    assert result.status == "apollo_profile_conflict"
-    assert result.company_name == ""
