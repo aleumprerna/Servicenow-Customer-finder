@@ -219,7 +219,7 @@ def test_person_company_fetches_complete_record_when_match_is_partial() -> None:
     assert session.calls[1][1].endswith("/people/person-1")
 
 
-def test_person_company_reports_matched_person_without_current_employer() -> None:
+def test_person_company_uses_latest_named_history_when_primary_is_null() -> None:
     session = FakeSession(
         [
             response(200, {"person": {
@@ -234,8 +234,42 @@ def test_person_company_reports_matched_person_without_current_employer() -> Non
                 "linkedin_url": "https://linkedin.com/in/raymond-moore-901b7551",
                 "organization_id": None,
                 "employment_history": [
-                    {"organization_name": "Past Company", "current": False}
+                    {
+                        "organization_name": "Older Company",
+                        "current": False,
+                        "start_date": "2018-01-01",
+                        "end_date": "2020-01-01",
+                    },
+                    {
+                        "organization_name": "Latest Company",
+                        "current": False,
+                        "start_date": "2021-01-01",
+                        "end_date": "2024-01-01",
+                    },
                 ],
+            }}),
+        ]
+    )
+    result = client(session).person_company(
+        "https://linkedin.com/in/raymond-moore-901b7551", "Raymond Moore"
+    )
+    assert result.name == "Latest Company"
+    assert result.selection_source == "employment_history_fallback"
+
+
+def test_person_company_is_unavailable_when_primary_and_history_names_are_null() -> None:
+    session = FakeSession(
+        [
+            response(200, {"person": {
+                "id": "person-1",
+                "name": "Raymond Moore",
+                "linkedin_url": "https://linkedin.com/in/raymond-moore-901b7551",
+            }}),
+            response(200, {"person": {
+                "id": "person-1",
+                "name": "Raymond Moore",
+                "linkedin_url": "https://linkedin.com/in/raymond-moore-901b7551",
+                "employment_history": [{"title": "Consultant", "current": False}],
             }}),
         ]
     )

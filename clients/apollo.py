@@ -52,6 +52,7 @@ class PersonOrganization:
     organization_id: str = ""
     person_headline: str = ""
     current_employments: tuple[CurrentEmploymentEvidence, ...] = ()
+    selection_source: str = "primary_organization"
 
 
 def linkedin_profile_matches(expected: str, returned: str) -> bool:
@@ -254,6 +255,7 @@ class ApolloClient:
                 organization_id=primary_id,
                 person_headline=str(person.get("headline") or "").strip(),
                 current_employments=self._current_employment_evidence(person),
+                selection_source=company.selection_source,
             )
 
         try:
@@ -261,7 +263,10 @@ class ApolloClient:
         except ApolloCurrentCompanyUnavailableError as initial_error:
             person_id = str(person.get("id") or "").strip()
             if not person_id:
-                raise
+                company = self._select_current_organization(
+                    person, allow_employment_history_fallback=True
+                )
+                return with_person_evidence(company)
             # People Match can identify the person while returning a partial
             # record. Apollo's complete-person endpoint supplies employment
             # history and full current-organization details for that stable ID.
@@ -277,7 +282,9 @@ class ApolloClient:
             returned_profile = str(person.get("linkedin_url") or returned_profile)
             profile_matched = linkedin_profile_matches(normalized, returned_profile)
             try:
-                company = self._select_current_organization(person)
+                company = self._select_current_organization(
+                    person, allow_employment_history_fallback=True
+                )
             except ApolloCurrentCompanyUnavailableError:
                 matched_name = str(person.get("name") or person_name or "the person").strip()
                 organization_id = str(person.get("organization_id") or "").strip()
@@ -329,16 +336,25 @@ class ApolloClient:
             )
         return tuple(evidence)
 
-    def _select_current_organization(self, person: dict[str, Any]) -> PersonOrganization:
+    def _select_current_organization(
+        self,
+        person: dict[str, Any],
+        *,
+        allow_employment_history_fallback: bool = False,
+    ) -> PersonOrganization:
         organization = person.get("organization")
-        primary = self._person_organization(organization) if isinstance(organization, dict) else None
+        primary = (
+            self._person_organization(organization, source="primary_organization")
+            if isinstance(organization, dict)
+            else None
+        )
         history = person.get("employment_history")
         current: list[tuple[str, PersonOrganization]] = []
         if isinstance(history, list):
             for item in history:
                 if not isinstance(item, dict) or item.get("current") is not True:
                     continue
-                candidate = self._person_organization(item)
+                candidate = self._person_organization(item, source="current_employment")
                 if candidate:
                     current.append((str(item.get("organization_id") or ""), candidate))
 
@@ -362,15 +378,21 @@ class ApolloClient:
         if len(unique_current) == 1:
             return next(iter(unique_current.values()))
         if len(unique_current) > 1:
-            raise ApolloNoMatchError(
-                "Apollo returned multiple current organizations and no reliable primary employer"
+            if allow_employment_history_fallback:
+                return self._latest_employment_organization(history)
+            raise ApolloCurrentCompanyUnavailableError(
+                "Apollo returned multiple current organizations and no named primary organization"
             )
+        if allow_employment_history_fallback:
+            return self._latest_employment_organization(history)
         raise ApolloCurrentCompanyUnavailableError(
             "Apollo matched the person but did not return a current organization"
         )
 
     @staticmethod
-    def _person_organization(value: dict[str, Any]) -> PersonOrganization | None:
+    def _person_organization(
+        value: dict[str, Any], *, source: str = "primary_organization"
+    ) -> PersonOrganization | None:
         nested = value.get("organization")
         organization = nested if isinstance(nested, dict) else value
         name = str(organization.get("name") or value.get("organization_name") or "").strip()
@@ -382,7 +404,31 @@ class ApolloClient:
                 str(organization.get("primary_domain") or organization.get("website_url") or "")
             ),
             linkedin_url=normalize_url(str(organization.get("linkedin_url") or "")),
+            selection_source=source,
         )
+
+    def _latest_employment_organization(self, history: Any) -> PersonOrganization:
+        if not isinstance(history, list):
+            raise ApolloCurrentCompanyUnavailableError(
+                "Apollo matched the person but employment history has no organization name"
+            )
+        candidates: list[tuple[tuple[int, str, int], PersonOrganization]] = []
+        for index, item in enumerate(history):
+            if not isinstance(item, dict):
+                continue
+            candidate = self._person_organization(
+                item, source="employment_history_fallback"
+            )
+            if not candidate:
+                continue
+            date = str(item.get("end_date") or item.get("start_date") or "").strip()
+            current_rank = 1 if item.get("current") is True else 0
+            candidates.append(((current_rank, date, -index), candidate))
+        if not candidates:
+            raise ApolloCurrentCompanyUnavailableError(
+                "Apollo matched the person but employment history has no organization name"
+            )
+        return max(candidates, key=lambda item: item[0])[1]
 
     def _search(self, company_name: str, domain: str) -> list[dict[str, Any]]:
         params: list[tuple[str, str | int]] = [

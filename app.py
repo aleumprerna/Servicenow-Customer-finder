@@ -139,6 +139,12 @@ def _pretty_status(value: Any, fallback: str = "Not available") -> str:
     return text.replace("_", " ").replace("-", " ").title() if text else fallback
 
 
+def _company_approval_status(row: dict[str, Any]) -> str:
+    if str(row.get("resolution_status") or "") in TRUSTED_COMPANY_STATUSES:
+        return ""
+    return '<span class="company-approval-status">Needs approval</span>'
+
+
 def _relationship(row: dict[str, Any], evidence: Any) -> str:
     researched = str(evidence.servicenow_status or "").strip()
     normalized = researched.casefold()
@@ -187,6 +193,14 @@ def _report_card(row: dict[str, Any]) -> str:
 
     company = _escape(row.get("company_name")) or "Company unresolved"
     person = _escape(row.get("person_name")) or "Unnamed person"
+    linkedin = _escape(row.get("linkedin_url"))
+    person_html = (
+        f'<a class="person-name" href="{linkedin}" target="_blank" '
+        f'rel="noreferrer">{person}</a>'
+        if linkedin
+        else f'<span class="person-name">{person}</span>'
+    )
+    company_approval_status = _company_approval_status(row)
     location = ", ".join(
         item for item in (_escape(row.get("headquarters")), _escape(row.get("country"))) if item
     ) or "Not available"
@@ -235,7 +249,6 @@ def _report_card(row: dict[str, Any]) -> str:
         f'<p class="detail-alert">{_escape(value)}</p>'
         for value in (row.get("resolution_error"), row.get("error_message")) if value
     )
-    linkedin = _escape(row.get("linkedin_url"))
     linkedin_html = (
         f'<a href="{linkedin}" target="_blank" rel="noreferrer">Open LinkedIn profile</a>'
         if linkedin else "Not available"
@@ -245,8 +258,9 @@ def _report_card(row: dict[str, Any]) -> str:
       <details class="report-card">
         <summary>
           <span class="summary-main">
-            <span class="person-name">{person}</span>
+            {person_html}
             <span class="company-name">{company}</span>
+            {company_approval_status}
           </span>
           <span class="relationship {_relationship_tone(relationship)}">
             <span class="status-dot"></span>{_escape(relationship)}
@@ -382,8 +396,9 @@ def _page(request: Request, selected_run: int | None = None) -> str:
       .report-card[open] {{ border-color:#b9c9e2; box-shadow:0 8px 24px rgba(30,45,75,.075); }}
       .report-card summary {{ list-style:none; cursor:pointer; display:grid; grid-template-columns:minmax(190px,1.1fr) minmax(145px,.6fr) minmax(240px,1fr) auto; align-items:center; gap:18px; padding:18px 20px; }}
       .report-card summary::-webkit-details-marker {{ display:none; }}
-      .summary-main {{ min-width:0; display:flex; flex-direction:column; gap:3px; }} .person-name {{ font-weight:750; font-size:15px; }}
+      .summary-main {{ min-width:0; display:flex; flex-direction:column; align-items:flex-start; gap:3px; }} .person-name {{ color:#172033; font-weight:750; font-size:15px; text-decoration:none; }} a.person-name:hover {{ color:#1769c2; text-decoration:underline; }}
       .company-name {{ color:#68758a; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+      .company-approval-status {{ display:inline-flex; align-items:center; width:max-content; margin-top:3px; border:1px solid #f0cf88; background:#fff4dc; color:#8a5a0d; border-radius:999px; padding:4px 8px; font-size:11px; line-height:1; font-weight:750; }}
       .relationship {{ width:max-content; display:inline-flex; align-items:center; gap:7px; border-radius:999px; padding:6px 10px; font-size:13px; font-weight:700; background:#f1f4f8; color:#526077; }}
       .status-dot {{ width:7px; height:7px; border-radius:50%; background:currentColor; }} .relationship.positive {{ background:#e8f7ef; color:#13744a; }} .relationship.warning {{ background:#fff4dc; color:#966317; }} .relationship.pending {{ background:#edf1f6; color:#65738a; }}
       .source-tags {{ display:flex; gap:6px; flex-wrap:wrap; }} .source-tag {{ display:inline-flex; align-items:center; width:max-content; border:1px solid #cee0fb; background:#edf5ff; color:#245b9e; border-radius:999px; padding:5px 9px; font-size:12px; font-weight:650; }}
@@ -407,7 +422,7 @@ def _page(request: Request, selected_run: int | None = None) -> str:
       <p class="muted">Upload people → enrich records → log into ServiceNow → run web automation → send verified “No” results to n8n.</p>
       {_message(request)}
       <section><h2>Upload people CSV</h2>
-        <p class="muted">Required headings: person name and LinkedIn URL. Your existing <code>Name</code> and <code>Profile URL</code> export works. Apollo reports a possible current employer; the app requires matching headline/company evidence or manual confirmation before using it.</p>
+        <p class="muted">Required headings: person name and LinkedIn URL. Automatic company resolution uses only Apollo data returned for that identity. CSV headline/company values remain report context and are not used as resolution evidence.</p>
         <form method="post" action="/runs" enctype="multipart/form-data"><input type="file" name="file" accept=".csv,text/csv" required><button class="primary">Upload CSV</button></form>
       </section>
       <section><h2>Current run</h2>

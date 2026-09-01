@@ -59,8 +59,8 @@ def main() -> int:
                 row
                 for row in rows
                 if row["resolution_status"] not in {
-                    "apollo_cross_verified",
-                    "linkedin_headline_verified",
+                    "apollo_structurally_verified",
+                    "manual_verified",
                     "manual_verified",
                 }
             ]

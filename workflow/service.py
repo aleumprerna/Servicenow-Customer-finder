@@ -21,8 +21,7 @@ from workflow.person_company import PersonCompanyResolver
 
 RUNS_DIR = PROJECT_ROOT / "data" / "runs"
 TRUSTED_COMPANY_STATUSES = {
-    "apollo_cross_verified",
-    "linkedin_headline_verified",
+    "apollo_structurally_verified",
     "manual_verified",
 }
 
@@ -91,9 +90,10 @@ def resolve_people(database: WorkflowDatabase, run_id: int, settings: Settings) 
     resolver = PersonCompanyResolver(_apollo(settings))
     people = database.people_for_run(run_id)
     for person in people:
-        # Older runs stored headline guesses without organization identifiers.
-        # Refresh those, and any unresolved row, through Apollo People Match.
-        if person["resolution_status"] in TRUSTED_COMPANY_STATUSES:
+        # Manual overrides are authoritative. Every Apollo-derived result is
+        # refreshed so older headline-based or weaker classifications migrate
+        # to the current API-only evidence rules.
+        if person["resolution_status"] == "manual_verified":
             continue
         result = resolver.resolve(
             person_name=person["person_name"],
