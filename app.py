@@ -137,40 +137,200 @@ def _company_cell(row: dict[str, Any]) -> str:
     return "".join(parts)
 
 
+def _pretty_status(value: Any, fallback: str = "Not available") -> str:
+    text = str(value or "").strip()
+    return text.replace("_", " ").replace("-", " ").title() if text else fallback
+
+
+def _relationship(row: dict[str, Any], evidence: Any) -> str:
+    researched = str(evidence.servicenow_status or "").strip()
+    normalized = researched.casefold()
+    if normalized in {"yes", "customer", "confirmed customer"}:
+        return "Customer"
+    if "partner" in normalized:
+        return researched
+    if researched and normalized not in {"not verified", "unknown", "no"}:
+        return researched
+
+    integration = str(row.get("servicenow_customer") or "").strip().casefold()
+    if integration == "yes":
+        return "Customer"
+    if normalized == "not verified":
+        return "Not verified"
+    if integration == "no":
+        return "Not found"
+    if integration == "unknown":
+        return "Needs review"
+    return "Pending"
+
+
+def _relationship_tone(label: str) -> str:
+    normalized = label.casefold()
+    if any(word in normalized for word in ("customer", "partner", "likely", "yes")):
+        return "positive"
+    if any(word in normalized for word in ("error", "review", "unknown")):
+        return "warning"
+    if any(word in normalized for word in ("not found", "not verified", "no")):
+        return "neutral"
+    return "pending"
+
+
+def _report_card(row: dict[str, Any]) -> str:
+    evidence = parse_n8n_evidence(
+        str(row.get("n8n_status") or ""), str(row.get("n8n_response") or "")
+    )
+    relationship = _relationship(row, evidence)
+    source_tags = list(evidence.source_tags)
+    if str(row.get("servicenow_customer") or "").casefold() == "yes":
+        source_tags.insert(0, "ServiceNow integration app")
+    source_tags = list(dict.fromkeys(source_tags))
+    tag_html = "".join(
+        f'<span class="source-tag">{_escape(tag)}</span>' for tag in source_tags
+    ) or '<span class="source-tag source-empty">No confirming source</span>'
+
+    company = _escape(row.get("company_name")) or "Company unresolved"
+    person = _escape(row.get("person_name")) or "Unnamed person"
+    location = ", ".join(
+        item for item in (_escape(row.get("headquarters")), _escape(row.get("country"))) if item
+    ) or "Not available"
+    confidence = _escape(row.get("match_score"))
+    confidence = f"{confidence}%" if confidence else "Not available"
+    screenshot = _screenshot_path(row)
+
+    citations = ""
+    if evidence.citations:
+        links: list[str] = []
+        for citation in evidence.citations:
+            label = f"{citation.citation_type}: {citation.title}"
+            if citation.url:
+                links.append(
+                    f'<li><a href="{_escape(citation.url)}" target="_blank" '
+                    f'rel="noreferrer">{_escape(label)}</a></li>'
+                )
+            else:
+                links.append(f'<li>{_escape(label)} <span class="muted">(URL unavailable)</span></li>')
+        citations = f'<div class="evidence-block"><h4>Citations</h4><ul class="citation-list">{"".join(links)}</ul></div>'
+
+    screenshot_html = ""
+    if screenshot:
+        screenshot_url = f'/screenshots/{int(row["person_id"])}'
+        screenshot_html = f"""
+          <div class="evidence-block screenshot-block">
+            <h4>ServiceNow screenshot</h4>
+            <a href="{screenshot_url}" target="_blank" title="Open full-size screenshot">
+              <img src="{screenshot_url}" loading="lazy" alt="ServiceNow match screenshot for {company}">
+            </a>
+          </div>"""
+
+    note_parts = []
+    if evidence.verification_status:
+        note_parts.append(f'<p class="verification">{_escape(evidence.verification_status)}</p>')
+    if evidence.evidence_strength:
+        note_parts.append(f'<p><strong>Evidence strength:</strong> {_escape(evidence.evidence_strength)}</p>')
+    if evidence.evidence_note:
+        note_parts.append(f'<p class="evidence-note">{_escape(evidence.evidence_note)}</p>')
+    if evidence.parse_error:
+        note_parts.append('<p class="detail-alert">The stored n8n response could not be fully read.</p>')
+    notes = "".join(note_parts) or '<p class="muted">No additional verification notes.</p>'
+
+    resolution = _company_cell(row)
+    errors = "".join(
+        f'<p class="detail-alert">{_escape(value)}</p>'
+        for value in (row.get("resolution_error"), row.get("error_message")) if value
+    )
+    linkedin = _escape(row.get("linkedin_url"))
+    linkedin_html = (
+        f'<a href="{linkedin}" target="_blank" rel="noreferrer">Open LinkedIn profile</a>'
+        if linkedin else "Not available"
+    )
+
+    return f"""
+      <details class="report-card">
+        <summary>
+          <span class="summary-main">
+            <span class="person-name">{person}</span>
+            <span class="company-name">{company}</span>
+          </span>
+          <span class="relationship {_relationship_tone(relationship)}">
+            <span class="status-dot"></span>{_escape(relationship)}
+          </span>
+          <span class="source-tags">{tag_html}</span>
+          <span class="expand-label"><span class="show-more">View details</span><span class="show-less">Close</span><span class="chevron">⌄</span></span>
+        </summary>
+        <div class="report-details">
+          <div class="detail-grid">
+            <div class="detail-group">
+              <h3>Person &amp; company</h3>
+              <dl>
+                <div><dt>LinkedIn</dt><dd>{linkedin_html}</dd></div>
+                <div><dt>Headline</dt><dd>{_escape(row.get("headline")) or "Not available"}</dd></div>
+                <div><dt>Company resolution</dt><dd>{resolution}</dd></div>
+                <div><dt>Apollo company</dt><dd>{_escape(row.get("apollo_company_name")) or "Not available"}</dd></div>
+                <div><dt>Location</dt><dd>{location}</dd></div>
+                <div><dt>Match confidence</dt><dd>{confidence}</dd></div>
+              </dl>
+            </div>
+            <div class="detail-group">
+              <h3>Workflow</h3>
+              <dl>
+                <div><dt>Integration app result</dt><dd>{_pretty_status(row.get("servicenow_customer"), "Pending")}</dd></div>
+                <div><dt>Matched name</dt><dd>{_escape(row.get("servicenow_matched_name")) or "Not available"}</dd></div>
+                <div><dt>Collection status</dt><dd>{_pretty_status(row.get("check_status"), "Waiting")}</dd></div>
+                <div><dt>n8n delivery</dt><dd>{_pretty_status(evidence.delivery_status, "Waiting")}</dd></div>
+                <div><dt>Checked</dt><dd>{_escape(row.get("checked_at")) or "Not yet"}</dd></div>
+              </dl>
+              {errors}
+            </div>
+          </div>
+          <div class="evidence-section">
+            <div class="evidence-block"><h3>Verification</h3>{notes}</div>
+            {citations}
+            {screenshot_html}
+          </div>
+        </div>
+      </details>"""
+
+
 def _page(request: Request, selected_run: int | None = None) -> str:
     summaries = DATABASE.summary()
     if selected_run is None and summaries:
         selected_run = int(summaries[0]["id"])
     rows = DATABASE.report_rows(selected_run) if selected_run else []
     run = DATABASE.run(selected_run) if selected_run else None
-    # Reuse the existing table layout while replacing the raw JSON value with
-    # trusted, structured evidence HTML.
-    for row in rows:
-        row["company_cell"] = _SafeHtml(_company_cell(row))
-        row["n8n_status"] = _SafeHtml(_n8n_cell(row))
-        row["n8n_response"] = ""
-        screenshot = _screenshot_path(row)
-        if screenshot:
-            matched_name = _escape(row.get("servicenow_matched_name"))
-            row["servicenow_matched_name"] = _SafeHtml(
-                f'{matched_name}<br><a class="screenshot-link" '
-                f'href="/screenshots/{int(row["person_id"])}" target="_blank">View screenshot</a>'
-            )
     options = "".join(
         f'<option value="{item["id"]}" {"selected" if item["id"] == selected_run else ""}>'
         f'Run #{item["id"]} — {_escape(item["status"])} ({item["people_count"]} people)</option>'
         for item in summaries
     )
-    report_rows = "".join(
-        "<tr>"
-        f"<td>{_escape(row['person_name'])}<br><a href=\"{_escape(row['linkedin_url'])}\" target=\"_blank\" rel=\"noreferrer\">LinkedIn</a></td>"
-        f"<td>{_escape(row['company_cell'])}</td>"
-        f"<td>{_escape(row['servicenow_customer']) or '—'}<br><small>{_escape(row['servicenow_matched_name'])}</small></td>"
-        f"<td>{_escape(row['check_status']) or 'Waiting'}</td>"
-        f"<td>{_escape(row['n8n_status']) or '—'}<br><small>{_escape(row['n8n_response'])[:180]}</small></td>"
-        "</tr>"
+    report_cards = "".join(_report_card(row) for row in rows)
+    if not report_cards:
+        report_cards = '<div class="empty-state"><strong>No reports yet</strong><span>Upload a people CSV to begin.</span></div>'
+
+    relationships = [
+        _relationship(
+            row,
+            parse_n8n_evidence(
+                str(row.get("n8n_status") or ""), str(row.get("n8n_response") or "")
+            ),
+        )
         for row in rows
-    ) or '<tr><td colspan="5">No people have been uploaded yet.</td></tr>'
+    ]
+    confirmed_count = sum(_relationship_tone(label) == "positive" for label in relationships)
+    integration_count = sum(
+        str(row.get("servicenow_customer") or "").casefold() == "yes" for row in rows
+    )
+    attention_count = sum(
+        str(row.get("check_status") or "").casefold() in {"error", "manual_review"}
+        or str(row.get("resolution_status") or "").casefold() in {"failed", "pending"}
+        for row in rows
+    )
+    report_stats = f"""
+      <div class="report-stats">
+        <div><strong>{len(rows)}</strong><span>Total reports</span></div>
+        <div><strong>{confirmed_count}</strong><span>Customers / partners</span></div>
+        <div><strong>{integration_count}</strong><span>Integration app matches</span></div>
+        <div><strong>{attention_count}</strong><span>Need attention</span></div>
+      </div>"""
     run_actions = ""
     run_log = ""
     if run:
@@ -187,14 +347,16 @@ def _page(request: Request, selected_run: int | None = None) -> str:
     return f"""<!doctype html>
     <html><head><meta charset="utf-8">{refresh}<title>ServiceNow Partner Workflow</title>
     <style>
-      body {{ font-family: system-ui, sans-serif; max-width: 1180px; margin: 32px auto; color:#1b2430; padding:0 16px; }}
-      h1 {{ margin-bottom: 4px; }} .muted, small {{ color:#617084; }}
-      section {{ border:1px solid #d7dee8; border-radius:10px; padding:18px; margin:18px 0; }}
+      * {{ box-sizing:border-box; }}
+      body {{ font-family:Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; max-width:1240px; margin:0 auto; color:#172033; padding:38px 20px 64px; background:#f5f7fb; }}
+      h1 {{ margin:0 0 6px; letter-spacing:-.035em; font-size:32px; }} h2 {{ margin:0 0 8px; letter-spacing:-.02em; }}
+      .muted, small {{ color:#68758a; }}
+      section {{ background:#fff; border:1px solid #e3e8f0; border-radius:16px; padding:22px; margin:18px 0; box-shadow:0 8px 28px rgba(30,45,75,.045); }}
       form {{ display:inline-block; margin: 4px 8px 4px 0; }} input, select, button {{ padding:9px 12px; font:inherit; }}
-      button, .button {{ border:0; border-radius:6px; background:#eef2f7; color:#172033; text-decoration:none; cursor:pointer; display:inline-block; }}
-      button.primary {{ background:#1463d9; color:white; }} button:disabled {{ opacity:.5; cursor:not-allowed; }}
-      table {{ width:100%; border-collapse:collapse; font-size:14px; }} th, td {{ border-bottom:1px solid #e4e9ef; text-align:left; vertical-align:top; padding:10px 8px; }}
-      .message {{ padding:10px; border-radius:6px; }} .success {{ background:#e5f7eb; }} .error {{ background:#fde8e8; }}
+      input, select {{ border:1px solid #d8deea; border-radius:8px; background:#fff; }}
+      button, .button {{ border:1px solid #dfe5ee; border-radius:8px; background:#f2f5f9; color:#172033; text-decoration:none; cursor:pointer; display:inline-block; font-weight:650; }}
+      button:hover, .button:hover {{ background:#e8edf5; }} button.primary {{ background:#1769e0; border-color:#1769e0; color:white; }} button:disabled {{ opacity:.5; cursor:not-allowed; }}
+      .message {{ padding:12px 14px; border-radius:10px; }} .success {{ background:#e5f7eb; }} .error {{ background:#fde8e8; }}
       .badge {{ display:inline-block; background:#e8edf4; border-radius:999px; padding:3px 8px; margin:0 4px 5px 0; font-size:12px; }}
       .badge.source {{ background:#e7f0ff; color:#164e9b; }} .evidence-status {{ font-weight:700; margin:5px 0; }}
       .verification {{ margin:4px 0; }} .evidence-note {{ color:#4b586a; margin:5px 0; max-width:420px; }}
@@ -205,6 +367,37 @@ def _page(request: Request, selected_run: int | None = None) -> str:
       .company-override input {{ min-width:180px; padding:6px 8px; }}
       .company-override button {{ padding:6px 8px; }}
       pre {{ white-space:pre-wrap; max-height:300px; overflow:auto; background:#111827; color:#e5e7eb; padding:12px; border-radius:6px; }}
+      .reports-section {{ padding:0; overflow:hidden; }} .reports-heading {{ padding:24px 24px 18px; border-bottom:1px solid #e8ecf2; }}
+      .reports-heading p {{ margin:0; }}
+      .report-stats {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:1px; background:#e8ecf2; border-bottom:1px solid #e8ecf2; }}
+      .report-stats div {{ background:#fafbfc; padding:18px 22px; display:flex; flex-direction:column; gap:2px; }}
+      .report-stats strong {{ font-size:24px; letter-spacing:-.03em; }} .report-stats span {{ color:#68758a; font-size:13px; }}
+      .report-list {{ padding:12px; display:flex; flex-direction:column; gap:8px; }}
+      .report-card {{ border:1px solid #e2e7ef; border-radius:12px; overflow:hidden; background:#fff; transition:border-color .15s, box-shadow .15s; }}
+      .report-card:hover {{ border-color:#cbd5e3; box-shadow:0 5px 16px rgba(30,45,75,.055); }}
+      .report-card[open] {{ border-color:#b9c9e2; box-shadow:0 8px 24px rgba(30,45,75,.075); }}
+      .report-card summary {{ list-style:none; cursor:pointer; display:grid; grid-template-columns:minmax(190px,1.1fr) minmax(145px,.6fr) minmax(240px,1fr) auto; align-items:center; gap:18px; padding:18px 20px; }}
+      .report-card summary::-webkit-details-marker {{ display:none; }}
+      .summary-main {{ min-width:0; display:flex; flex-direction:column; gap:3px; }} .person-name {{ font-weight:750; font-size:15px; }}
+      .company-name {{ color:#68758a; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+      .relationship {{ width:max-content; display:inline-flex; align-items:center; gap:7px; border-radius:999px; padding:6px 10px; font-size:13px; font-weight:700; background:#f1f4f8; color:#526077; }}
+      .status-dot {{ width:7px; height:7px; border-radius:50%; background:currentColor; }} .relationship.positive {{ background:#e8f7ef; color:#13744a; }} .relationship.warning {{ background:#fff4dc; color:#966317; }} .relationship.pending {{ background:#edf1f6; color:#65738a; }}
+      .source-tags {{ display:flex; gap:6px; flex-wrap:wrap; }} .source-tag {{ display:inline-flex; align-items:center; width:max-content; border:1px solid #cee0fb; background:#edf5ff; color:#245b9e; border-radius:999px; padding:5px 9px; font-size:12px; font-weight:650; }}
+      .source-tag.source-empty {{ border-color:#e1e5eb; background:#f6f7f9; color:#778297; font-weight:500; }}
+      .expand-label {{ display:flex; align-items:center; gap:7px; color:#526077; font-size:12px; font-weight:700; white-space:nowrap; }} .show-less {{ display:none; }} .chevron {{ font-size:18px; transition:transform .15s; }}
+      .report-card[open] .show-more {{ display:none; }} .report-card[open] .show-less {{ display:inline; }} .report-card[open] .chevron {{ transform:rotate(180deg); }}
+      .report-details {{ border-top:1px solid #e8ecf2; padding:22px 20px 24px; background:#fbfcfe; }}
+      .detail-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:18px; }} .detail-group, .evidence-block {{ border:1px solid #e3e8f0; border-radius:10px; background:#fff; padding:18px; min-width:0; }}
+      .detail-group h3, .evidence-block h3, .evidence-block h4 {{ margin:0 0 14px; font-size:14px; }}
+      dl {{ margin:0; }} dl > div {{ display:grid; grid-template-columns:145px 1fr; gap:14px; padding:9px 0; border-bottom:1px solid #eef1f5; }} dl > div:last-child {{ border-bottom:0; }}
+      dt {{ color:#748096; font-size:12px; font-weight:650; }} dd {{ margin:0; font-size:13px; overflow-wrap:anywhere; }}
+      .evidence-section {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; margin-top:18px; }} .evidence-block p {{ margin:7px 0; font-size:13px; line-height:1.5; }}
+      .citation-list {{ margin:0; padding-left:18px; font-size:13px; }} .citation-list li {{ margin:8px 0; }} a {{ color:#1769c2; }}
+      .screenshot-block img {{ display:block; width:100%; max-height:170px; object-fit:cover; object-position:top; border:1px solid #e1e6ed; border-radius:7px; }}
+      .detail-alert {{ color:#a13b32; background:#fff0ee; border-radius:7px; padding:8px 10px; font-size:12px; }}
+      .empty-state {{ padding:52px 20px; text-align:center; color:#68758a; display:flex; flex-direction:column; gap:5px; }}
+      @media (max-width:850px) {{ .report-stats {{ grid-template-columns:1fr 1fr; }} .report-card summary {{ grid-template-columns:1fr auto; }} .source-tags {{ grid-column:1 / -1; }} .relationship {{ justify-self:end; }} .expand-label {{ grid-column:2; grid-row:2; }} .detail-grid, .evidence-section {{ grid-template-columns:1fr; }} }}
+      @media (max-width:520px) {{ body {{ padding:24px 10px 40px; }} section {{ border-radius:12px; padding:16px; }} .reports-section {{ padding:0; }} .report-card summary {{ padding:15px; gap:12px; }} .show-more, .show-less {{ display:none !important; }} dl > div {{ grid-template-columns:1fr; gap:3px; }} }}
     </style></head><body>
       <h1>ServiceNow Partner Workflow</h1>
       <p class="muted">Upload people → log into ServiceNow → collect customer checks → send verified “No” results to n8n.</p>
@@ -223,8 +416,10 @@ def _page(request: Request, selected_run: int | None = None) -> str:
         <p class="muted">Clears local workflow runs and reports only. Your CSV files, configuration, Chrome profile, and source code remain unchanged.</p>
         <form method="post" action="/database/clear" onsubmit="return confirm('Delete every local workflow run and report? This cannot be undone.');"><button>Clear database</button></form>
       </section>
-      <section><h2>Reports</h2>
-        <table><thead><tr><th>Person</th><th>Company</th><th>ServiceNow</th><th>Automation</th><th>n8n</th></tr></thead><tbody>{report_rows}</tbody></table>
+      <section class="reports-section">
+        <div class="reports-heading"><h2>Reports</h2><p class="muted">The essentials at a glance. Select a person to open evidence, citations, and screenshots.</p></div>
+        {report_stats}
+        <div class="report-list">{report_cards}</div>
       </section>
     </body></html>"""
 

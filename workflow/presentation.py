@@ -23,6 +23,7 @@ class N8nEvidence:
     evidence_note: str = ""
     research_sources: tuple[str, ...] = ()
     citations: tuple[EvidenceCitation, ...] = ()
+    source_tags: tuple[str, ...] = ()
     parse_error: bool = False
 
 
@@ -39,6 +40,11 @@ def _source_label(value: Any) -> str:
         "google": "Web search",
         "servicenow": "ServiceNow",
         "official_servicenow": "Official ServiceNow",
+        "official_servicenow_customer": "Official ServiceNow customer",
+        "servicenow_customer_page": "Official ServiceNow customer",
+        "official_servicenow_partner": "Official ServiceNow partner",
+        "servicenow_partner_page": "Official ServiceNow partner",
+        "servicenow_integration_app": "ServiceNow integration app",
         "none": "No confirming source",
     }
     return labels.get(normalized, _text(value).replace("_", " ").title())
@@ -48,6 +54,54 @@ def _safe_url(value: Any) -> str:
     url = _text(value).strip("\"'[]() ")
     parts = urlsplit(url)
     return url if parts.scheme in {"http", "https"} and parts.netloc else ""
+
+
+def _source_tags(
+    source_type: str,
+    research_sources: tuple[str, ...],
+    citations: tuple[EvidenceCitation, ...],
+) -> tuple[str, ...]:
+    """Return stable UI labels for the places that contributed evidence."""
+
+    tags: list[str] = []
+
+    def add(label: str) -> None:
+        if label not in tags:
+            tags.append(label)
+
+    normalized_source = source_type.casefold()
+    normalized_research = {item.casefold().replace("_", " ") for item in research_sources}
+    if normalized_source == "web search" or normalized_research.intersection(
+        {"google", "web search", "websearch", "bing"}
+    ):
+        add("Web search")
+    if "servicenow" in normalized_source and "integration app" in normalized_source:
+        add("ServiceNow integration app")
+    if "servicenow" in normalized_source and "customer" in normalized_source:
+        add("ServiceNow customer page")
+    if "servicenow" in normalized_source and "partner" in normalized_source:
+        add("ServiceNow partner page")
+
+    for citation in citations:
+        combined = f"{citation.citation_type} {citation.title}".casefold()
+        parts = urlsplit(citation.url)
+        host = parts.netloc.casefold().removeprefix("www.")
+        path = parts.path.casefold()
+        is_servicenow = host == "servicenow.com" or host.endswith(".servicenow.com")
+        if (is_servicenow and "/customer" in path) or (
+            "servicenow" in combined and "customer" in combined
+        ):
+            add("ServiceNow customer page")
+        if (is_servicenow and "/partner" in path) or (
+            "servicenow" in combined and "partner" in combined
+        ):
+            add("ServiceNow partner page")
+
+    if source_type == "Official ServiceNow" and not any(
+        tag.startswith("ServiceNow ") for tag in tags
+    ):
+        add("ServiceNow website")
+    return tuple(tags)
 
 
 def parse_n8n_evidence(delivery_status: str, response: str) -> N8nEvidence:
@@ -81,10 +135,19 @@ def parse_n8n_evidence(delivery_status: str, response: str) -> N8nEvidence:
             citation_items.extend(item for item in value if isinstance(item, dict))
     evidence_urls = result.get("evidence_urls")
     if isinstance(evidence_urls, list):
-        citation_items.extend(
-            {"type": source_type or "Evidence", "title": "Evidence", "url": url}
-            for url in evidence_urls
-        )
+        for item in evidence_urls:
+            if isinstance(item, dict):
+                citation_items.append(
+                    {
+                        "type": _text(item.get("type")) or source_type or "Evidence",
+                        "title": _text(item.get("title")) or "Official evidence",
+                        "url": item.get("url"),
+                    }
+                )
+            else:
+                citation_items.append(
+                    {"type": source_type or "Evidence", "title": "Evidence", "url": item}
+                )
 
     citations: list[EvidenceCitation] = []
     seen: set[tuple[str, str, str]] = set()
@@ -99,6 +162,7 @@ def parse_n8n_evidence(delivery_status: str, response: str) -> N8nEvidence:
             seen.add(key)
             citations.append(citation)
 
+    citation_tuple = tuple(citations)
     return N8nEvidence(
         delivery_status=delivery_status,
         servicenow_status=_text(result.get("servicenow_user")),
@@ -107,5 +171,6 @@ def parse_n8n_evidence(delivery_status: str, response: str) -> N8nEvidence:
         evidence_strength=_text(result.get("evidence_strength")),
         evidence_note=_text(result.get("evidence_note")),
         research_sources=research_sources,
-        citations=tuple(citations),
+        citations=citation_tuple,
+        source_tags=_source_tags(source_type, research_sources, citation_tuple),
     )
