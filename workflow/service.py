@@ -231,7 +231,7 @@ def send_negatives_to_n8n(database: WorkflowDatabase, run_id: int, settings: Set
 
 
 def _pipeline_process(
-    *, input_path: Path, output_path: Path, stage: str
+    *, input_path: Path, output_path: Path, stage: str, force: bool
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment["INPUT_CSV"] = str(input_path)
@@ -240,8 +240,12 @@ def _pipeline_process(
     environment["SAVE_SCREENSHOTS"] = "true"
     venv_python = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
     python_executable = str(venv_python) if venv_python.is_file() else sys.executable
+    command = [python_executable, "main.py"]
+    if force:
+        command.append("--force")
+    command.append(stage)
     return subprocess.run(
-        [python_executable, "main.py", "--force", stage],
+        command,
         cwd=PROJECT_ROOT,
         env=environment,
         capture_output=True,
@@ -274,6 +278,7 @@ def run_enrichment(database: WorkflowDatabase, run_id: int) -> None:
             input_path=input_path,
             output_path=output_path,
             stage="--enrich-only",
+            force=True,
         )
         synced_count = sync_pipeline_results(database, run_id, output_path)
         report_rows = database.report_rows(run_id)
@@ -317,6 +322,7 @@ def run_collection(database: WorkflowDatabase, run_id: int) -> None:
             input_path=input_path,
             output_path=output_path,
             stage="--automation-only",
+            force=False,
         )
         sync_count = sync_pipeline_results(database, run_id, output_path)
         sent_count = send_negatives_to_n8n(database, run_id, settings)

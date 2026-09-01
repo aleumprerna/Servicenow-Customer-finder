@@ -182,17 +182,10 @@ async def automate_indices(
         LOGGER.error("No enriched rows are ready. Run the enrichment stage first.")
         return 2
 
-    async with async_playwright() as playwright:
-        try:
-            connected = await connect_to_servicenow(playwright, settings.chrome_cdp_url)
-        except (ConnectionError, FormNotFoundError) as exc:
-            LOGGER.error("%s", clean_error(exc))
-            return 3
-
-        LOGGER.info("Connected to existing Chrome and found the ServiceNow customer form.")
-        checker = ServiceNowChecker(
-            page=connected.page,
-            frame=connected.frame,
+    def make_checker(connection: object) -> ServiceNowChecker:
+        return ServiceNowChecker(
+            page=connection.page,  # type: ignore[attr-defined]
+            frame=connection.frame,  # type: ignore[attr-defined]
             timeout_seconds=settings.search_timeout_seconds,
             match_threshold=settings.match_threshold,
             review_threshold=settings.review_threshold,
@@ -201,31 +194,57 @@ async def automate_indices(
             result_selectors=settings.result_selectors,
         )
 
+    async with async_playwright() as playwright:
+        try:
+            connected = await connect_to_servicenow(playwright, settings.chrome_cdp_url)
+        except (ConnectionError, FormNotFoundError) as exc:
+            LOGGER.error("%s", clean_error(exc))
+            return 3
+
+        LOGGER.info("Connected to existing Chrome and found the ServiceNow customer form.")
+        checker = make_checker(connected)
+
         for position, index in enumerate(ready, start=1):
             record = csv_service.record(index)
             country_code = normalize_country(record.country_code)
             LOGGER.info("[%d/%d] %s", position, len(ready), record.company_name)
-            try:
-                await checker.assert_session_active()
-            except SessionExpiredError as exc:
-                csv_service.update(
-                    index,
-                    servicenow_customer="Unknown",
-                    check_status=CheckStatus.ERROR,
-                    error_message=clean_error(exc),
-                    checked_at=record.checked_now(),
-                )
-                csv_service.save()
-                LOGGER.error("%s", clean_error(exc))
-                return 4
-
             csv_service.update(index, check_status=CheckStatus.SEARCHING)
             csv_service.save()
             LOGGER.info("Selecting country: %s - %s", country_code, country_name(country_code))
             LOGGER.info("Searching customer: %s", record.company_name)
 
             try:
-                result = await checker.search_with_retry(record.company_name, country_code)
+                for session_attempt in range(2):
+                    try:
+                        await checker.assert_session_active()
+                        result = await checker.search_with_retry(record.company_name, country_code)
+                        break
+                    except SessionExpiredError as exc:
+                        if session_attempt > 0:
+                            raise
+                        LOGGER.warning(
+                            "%s; looking for a replacement ServiceNow page and retrying once",
+                            clean_error(exc),
+                        )
+                        reconnect_error: Exception = exc
+                        for _ in range(5):
+                            await asyncio.sleep(1)
+                            try:
+                                connected = await connect_to_servicenow(
+                                    playwright, settings.chrome_cdp_url
+                                )
+                                checker = make_checker(connected)
+                                LOGGER.info(
+                                    "Reconnected to the ServiceNow form after the page changed"
+                                )
+                                break
+                            except (ConnectionError, FormNotFoundError) as candidate_error:
+                                reconnect_error = candidate_error
+                        else:
+                            raise SessionExpiredError(
+                                "The ServiceNow page closed and no replacement form appeared: "
+                                f"{clean_error(reconnect_error)}"
+                            ) from reconnect_error
                 screenshot_path = ""
                 if result.customer.casefold() == "yes" and settings.save_screenshots:
                     screenshot_path = str(
