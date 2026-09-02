@@ -140,6 +140,34 @@ class WorkflowDatabase:
                 (company_name, domain, company_linkedin_url, status, error, person_id),
             )
 
+    def reset_check_for_company_change(
+        self, person_id: int, run_id: int, company_name: str
+    ) -> None:
+        """Queue only a corrected company for fresh enrichment and automation."""
+
+        self.upsert_check(
+            person_id,
+            run_id,
+            {
+                "company_name": company_name,
+                "servicenow_customer": "",
+                "servicenow_matched_name": "",
+                "screenshot_path": "",
+                "match_score": "",
+                "check_status": "pending",
+                "headquarters": "",
+                "country": "",
+                "country_code": "",
+                "apollo_company_name": "",
+                "error_message": "",
+                "checked_at": "",
+                "n8n_status": "not_sent",
+                "n8n_response": "",
+                "n8n_sent_at": "",
+                "n8n_received_at": "",
+            },
+        )
+
     def upsert_check(self, person_id: int, run_id: int, values: dict[str, str]) -> None:
         columns = ["person_id", "run_id", *values.keys()]
         placeholders = ", ".join("?" for _ in columns)
@@ -190,7 +218,9 @@ class WorkflowDatabase:
         query = """
             SELECT r.id AS run_id, r.status AS run_status, r.created_at,
                    p.id AS person_id, p.row_number, p.person_name, p.linkedin_url, p.headline,
-                   p.company_name, p.resolution_status, p.resolution_error,
+                   p.company_name, p.company_domain, p.company_linkedin_url,
+                   p.resolution_status, p.resolution_error,
+                   c.company_name AS check_company_name,
                    c.servicenow_customer, c.servicenow_matched_name, c.match_score,
                    c.screenshot_path,
                    c.check_status, c.headquarters, c.country, c.country_code,

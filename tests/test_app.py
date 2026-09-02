@@ -1,3 +1,7 @@
+import json
+from pathlib import Path
+
+from fastapi import BackgroundTasks
 from starlette.requests import Request
 
 import app as dashboard
@@ -90,6 +94,60 @@ def test_stage_tables_show_distinct_workflow_data() -> None:
     assert "n8n delivery" in final
 
 
+def test_final_table_expands_the_whole_record_and_uses_n8n_citations() -> None:
+    row = _row("apollo_structurally_verified")
+    row.update(
+        {
+            "check_status": "completed",
+            "servicenow_customer": "No",
+            "n8n_status": "received",
+            "n8n_response": json.dumps(
+                {
+                    "result": {
+                        "citations": [
+                            {
+                                "type": "Official ServiceNow Partner",
+                                "title": "Example partner profile",
+                                "url": "https://www.servicenow.com/partners/example.html",
+                            }
+                        ]
+                    }
+                }
+            ),
+        }
+    )
+
+    html = _final_results_table([row])
+
+    assert '<details class="final-record">' in html
+    assert "Show record" in html
+    assert "n8n research citations" in html
+    assert "https://www.servicenow.com/partners/example.html" in html
+
+
+def test_final_table_prefers_a_screenshot_over_n8n_citations(
+    monkeypatch,
+) -> None:
+    row = _row("apollo_structurally_verified")
+    row.update(
+        {
+            "check_status": "completed",
+            "servicenow_customer": "Yes",
+            "n8n_status": "received",
+            "n8n_response": json.dumps(
+                {"result": {"citations": [{"title": "Fallback citation", "url": "https://example.com"}]}}
+            ),
+        }
+    )
+    monkeypatch.setattr(dashboard, "_screenshot_path", lambda _row: Path("capture.png"))
+
+    html = _final_results_table([row])
+
+    assert "ServiceNow evidence" in html
+    assert 'src="/screenshots/1"' in html
+    assert "n8n research citations" not in html
+
+
 def test_page_renders_progress_steps_and_three_record_tabs(monkeypatch) -> None:
     row = _row("apollo_structurally_verified")
     row.update({"check_status": "apollo_success", "apollo_company_name": "Example Company"})
@@ -120,3 +178,89 @@ def test_page_renders_progress_steps_and_three_record_tabs(monkeypatch) -> None:
     assert "Enriched records" in html
     assert "Web automation" in html
     assert "Final table" in html
+    assert "Customer verification workspace" in html
+    assert 'class="overview-stats"' in html
+    assert "Companies approved" in html
+    assert "prefers-reduced-motion" in html
+    assert 'class="async-stage-form"' in html
+    assert 'class="stage-progress"' in html
+    assert '<meta http-equiv="refresh"' not in html
+    enriched_button = html.split('id="tab-enriched"', 1)[0].rsplit("<button", 1)[1]
+    assert "tab-button active" in enriched_button
+
+
+def test_progress_payload_reports_live_stage_counts(monkeypatch) -> None:
+    ready = _row("apollo_structurally_verified")
+    ready.update({"person_id": 1, "check_status": "apollo_success"})
+    pending = _row("manual_verified")
+    pending.update({"person_id": 2, "check_status": "pending"})
+
+    class Database:
+        def run(self, run_id):
+            assert run_id == 7
+            return {"id": 7, "status": "enriching"}
+
+        def report_rows(self, run_id):
+            assert run_id == 7
+            return [ready, pending]
+
+    monkeypatch.setattr(dashboard, "DATABASE", Database())
+
+    progress = dashboard._run_progress(7)
+
+    assert progress["busy"] is True
+    assert progress["enriched"] == 1
+    assert progress["target"] == 2
+    assert progress["enrichment_percent"] == 50
+    assert progress["automation_percent"] == 0
+
+
+def test_failed_enrichment_finishes_the_stage_and_allows_ready_rows_to_continue(
+    monkeypatch,
+) -> None:
+    ready = _row("manual_verified")
+    ready.update({"person_id": 1, "check_status": "apollo_success"})
+    failed = _row("manual_verified")
+    failed.update({"person_id": 2, "check_status": "apollo_failed"})
+
+    class Database:
+        def run(self, _run_id):
+            return {"id": 7, "status": "needs_attention"}
+
+        def report_rows(self, _run_id):
+            return [ready, failed]
+
+    monkeypatch.setattr(dashboard, "DATABASE", Database())
+
+    progress = dashboard._run_progress(7)
+
+    assert progress["busy"] is False
+    assert progress["processed"] == 2
+    assert progress["failed_enrichment"] == 1
+    assert progress["enrichment_complete"] is True
+    assert progress["enrichment_percent"] == 100
+    assert progress["automation_target"] == 1
+    assert progress["can_automate"] is True
+
+
+def test_web_automation_can_start_when_some_enriched_rows_are_ready(monkeypatch) -> None:
+    updates: list[dict[str, str]] = []
+
+    class Database:
+        def run(self, _run_id):
+            return {"id": 7, "status": "needs_enrichment"}
+
+        def report_rows(self, _run_id):
+            return [{"check_status": "apollo_success"}, {"check_status": "apollo_failed"}]
+
+        def update_run(self, _run_id, **values):
+            updates.append(values)
+
+    monkeypatch.setattr(dashboard, "DATABASE", Database())
+    tasks = BackgroundTasks()
+
+    response = dashboard.collect(7, tasks)
+
+    assert response.status_code == 303
+    assert updates == [{"status": "collecting"}]
+    assert len(tasks.tasks) == 1

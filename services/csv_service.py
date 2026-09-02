@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -110,6 +111,15 @@ class CSVService:
         temp_path = Path(temp_name)
         try:
             self.frame.to_csv(temp_path, index=False)
-            os.replace(temp_path, self.output_path)
+            for attempt in range(20):
+                try:
+                    os.replace(temp_path, self.output_path)
+                    break
+                except PermissionError:
+                    if attempt == 19:
+                        raise
+                    # A dashboard progress read can briefly hold the target on
+                    # Windows. Retry without losing the completed row update.
+                    time.sleep(0.05)
         finally:
             temp_path.unlink(missing_ok=True)

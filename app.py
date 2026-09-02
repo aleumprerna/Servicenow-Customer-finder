@@ -28,6 +28,10 @@ from workflow.service import (
 DATABASE = WorkflowDatabase(PROJECT_ROOT / "data" / "workflow.db")
 app = FastAPI(title="ServiceNow Partner Workflow", docs_url=None, redoc_url=None)
 
+ENRICHED_CHECK_STATUSES = {"apollo_success", "searching", "completed", "manual_review", "error"}
+ENRICHMENT_TERMINAL_STATUSES = ENRICHED_CHECK_STATUSES | {"apollo_failed"}
+AUTOMATION_FINISHED_STATUSES = {"completed", "manual_review", "error"}
+
 
 class _SafeHtml(str):
     """HTML generated only by trusted dashboard rendering helpers."""
@@ -137,6 +141,28 @@ def _company_cell(row: dict[str, Any]) -> str:
 def _pretty_status(value: Any, fallback: str = "Not available") -> str:
     text = str(value or "").strip()
     return text.replace("_", " ").replace("-", " ").title() if text else fallback
+
+
+def _workflow_counts(rows: list[dict[str, Any]]) -> tuple[int, int, int]:
+    enriched = sum(
+        str(row.get("check_status") or "").casefold() in ENRICHED_CHECK_STATUSES
+        for row in rows
+    )
+    automated = sum(
+        str(row.get("check_status") or "").casefold() in AUTOMATION_FINISHED_STATUSES
+        for row in rows
+    )
+    approved = sum(
+        str(row.get("resolution_status") or "") in TRUSTED_COMPANY_STATUSES for row in rows
+    )
+    return enriched, automated, approved
+
+
+def _enrichment_processed_count(rows: list[dict[str, Any]]) -> int:
+    return sum(
+        str(row.get("check_status") or "").casefold() in ENRICHMENT_TERMINAL_STATUSES
+        for row in rows
+    )
 
 
 def _company_approval_status(row: dict[str, Any]) -> str:
@@ -266,7 +292,7 @@ def _report_card(row: dict[str, Any]) -> str:
             <span class="status-dot"></span>{_escape(relationship)}
           </span>
           <span class="source-tags">{tag_html}</span>
-          <span class="expand-label"><span class="show-more">View details</span><span class="show-less">Close</span><span class="chevron">⌄</span></span>
+          <span class="expand-label"><span class="show-more">View details</span><span class="show-less">Close</span><span class="chevron" aria-hidden="true">⌄</span></span>
         </summary>
         <div class="report-details">
           <div class="detail-grid">
@@ -402,7 +428,7 @@ def _automation_table(rows: list[dict[str, Any]]) -> str:
 
 
 def _final_results_table(rows: list[dict[str, Any]]) -> str:
-    body: list[str] = []
+    records: list[str] = []
     for row in rows:
         evidence = parse_n8n_evidence(
             str(row.get("n8n_status") or ""), str(row.get("n8n_response") or "")
@@ -418,24 +444,142 @@ def _final_results_table(rows: list[dict[str, Any]]) -> str:
         ) or '<span class="cell-secondary">No confirming source</span>'
         trusted = str(row.get("resolution_status") or "") in TRUSTED_COMPANY_STATUSES
         approval = "" if trusted else _status_pill("Needs approval", "warning")
-        body.append(
-            f"""
-            <tr>
-              <td>{_table_person_link(row)}<span class="cell-secondary">{_escape(row.get('company_name')) or 'Company unresolved'}</span>{approval}</td>
-              <td>{_status_pill(relationship, relationship_tone)}</td>
-              <td>{_pretty_status(row.get('servicenow_customer'), 'Not checked')}</td>
-              <td><div class="source-tags">{sources}</div></td>
-              <td>{_status_pill(evidence.delivery_status or 'Waiting', 'info' if evidence.delivery_status else 'neutral')}</td>
-              <td><details class="table-evidence"><summary>View evidence</summary>{_n8n_cell(row)}</details></td>
-            </tr>"""
+        screenshot = _screenshot_path(row)
+        if screenshot:
+            screenshot_url = f'/screenshots/{int(row["person_id"])}'
+            evidence_html = f"""
+              <div class="final-evidence-card screenshot-evidence">
+                <div class="evidence-title"><span>ServiceNow evidence</span><small>Screenshot captured during automation</small></div>
+                <a href="{screenshot_url}" target="_blank" title="Open full-size screenshot">
+                  <img src="{screenshot_url}" loading="lazy" alt="ServiceNow result for {_escape(row.get('company_name'))}">
+                </a>
+              </div>"""
+        elif evidence.citations:
+            citation_items: list[str] = []
+            for citation in evidence.citations:
+                label = f"{citation.citation_type}: {citation.title}"
+                if citation.url:
+                    citation_items.append(
+                        f'<li><a href="{_escape(citation.url)}" target="_blank" '
+                        f'rel="noreferrer">{_escape(label)}</a></li>'
+                    )
+                else:
+                    citation_items.append(f'<li>{_escape(label)} <span class="muted">(URL unavailable)</span></li>')
+            evidence_html = f"""
+              <div class="final-evidence-card">
+                <div class="evidence-title"><span>n8n research citations</span><small>Shown because no ServiceNow screenshot is available</small></div>
+                <ul class="citation-list">{''.join(citation_items)}</ul>
+              </div>"""
+        else:
+            evidence_html = """
+              <div class="final-evidence-card evidence-empty">
+                <div class="evidence-title"><span>No visual evidence or citation available</span><small>The record has not returned a screenshot or an n8n citation yet.</small></div>
+              </div>"""
+
+        verification_note = (
+            _escape(evidence.evidence_note)
+            or _escape(evidence.verification_status)
+            or "No additional verification note was returned."
         )
-    if not body:
-        body.append('<tr><td class="table-empty" colspan="6">Final results will appear after processing.</td></tr>')
+        records.append(
+            f"""
+            <details class="final-record">
+              <summary class="final-record-summary">
+                <span class="final-cell record-person">{_table_person_link(row)}<span class="cell-secondary">{_escape(row.get('company_name')) or 'Company unresolved'}</span>{approval}</span>
+                <span class="final-cell">{_status_pill(relationship, relationship_tone)}</span>
+                <span class="final-cell">{_pretty_status(row.get('servicenow_customer'), 'Not checked')}</span>
+                <span class="final-cell"><span class="source-tags">{sources}</span></span>
+                <span class="final-cell">{_status_pill(evidence.delivery_status or 'Waiting', 'info' if evidence.delivery_status else 'neutral')}</span>
+                <span class="record-expand"><span class="expand-text">Show record</span><span class="chevron" aria-hidden="true">⌄</span></span>
+              </summary>
+              <div class="final-record-details">
+                <div class="final-record-facts">
+                  <div><span>Matched result</span><strong>{_escape(row.get('servicenow_matched_name')) or 'No match recorded'}</strong></div>
+                  <div><span>Checked</span><strong>{_escape(row.get('checked_at')) or 'Not checked yet'}</strong></div>
+                  <div><span>Evidence strength</span><strong>{_escape(evidence.evidence_strength) or 'Not available'}</strong></div>
+                  <div><span>Company resolution</span><strong>{_pretty_status(row.get('resolution_status'), 'Waiting')}</strong></div>
+                </div>
+                <div class="final-record-evidence">
+                  {evidence_html}
+                  <div class="final-evidence-card verification-card"><div class="evidence-title"><span>Verification note</span></div><p>{verification_note}</p></div>
+                </div>
+              </div>
+            </details>"""
+        )
+    if not records:
+        records.append('<div class="table-empty">Final results will appear after processing.</div>')
     return f"""
-      <div class="table-scroll"><table class="data-table final-table">
-        <thead><tr><th>Person &amp; company</th><th>Final status</th><th>ServiceNow app</th><th>Sources</th><th>n8n delivery</th><th>Details</th></tr></thead>
-        <tbody>{''.join(body)}</tbody>
-      </table></div>"""
+      <div class="final-records">
+        <div class="final-record-header" aria-hidden="true"><span>Person &amp; company</span><span>Final status</span><span>ServiceNow app</span><span>Sources</span><span>n8n delivery</span><span></span></div>
+        {''.join(records)}
+      </div>"""
+
+
+def _run_progress(run_id: int) -> dict[str, Any]:
+    run = DATABASE.run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    rows = DATABASE.report_rows(run_id)
+    total = len(rows)
+    enriched, automated, approved = _workflow_counts(rows)
+    target = approved or total
+    processed = _enrichment_processed_count(rows)
+    failed_enrichment = sum(
+        str(row.get("check_status") or "").casefold() == "apollo_failed" for row in rows
+    )
+    automation_target = enriched
+    enrichment_complete = approved > 0 and processed >= approved
+    automation_complete = automation_target > 0 and automated >= automation_target
+    busy = run["status"] in {"enriching", "collecting"}
+    enrich_state = "active" if run["status"] == "enriching" or not enrichment_complete else "complete"
+    automation_state = (
+        "locked"
+        if run["status"] == "enriching"
+        else "active"
+        if run["status"] == "collecting" or (enriched > 0 and not automation_complete)
+        else "complete" if automation_complete else "locked"
+    )
+    confirmed = sum(
+        _relationship_tone(
+            _relationship(
+                row,
+                parse_n8n_evidence(
+                    str(row.get("n8n_status") or ""), str(row.get("n8n_response") or "")
+                ),
+            )
+        )
+        == "positive"
+        for row in rows
+    )
+
+    def percent(value: int, maximum: int) -> int:
+        return min(100, round(100 * value / maximum)) if maximum else 0
+
+    return {
+        "run_id": run_id,
+        "run_status": str(run["status"]),
+        "run_status_label": _pretty_status(run["status"]),
+        "busy": busy,
+        "total": total,
+        "approved": approved,
+        "target": target,
+        "processed": processed,
+        "failed_enrichment": failed_enrichment,
+        "enriched": enriched,
+        "automated": automated,
+        "automation_target": automation_target,
+        "confirmed": confirmed,
+        "enrichment_percent": percent(processed, target),
+        "automation_percent": percent(automated, automation_target),
+        "enrichment_complete": enrichment_complete,
+        "automation_complete": automation_complete,
+        "enrich_state": enrich_state,
+        "automation_state": automation_state,
+        "can_enrich": not busy,
+        "can_automate": not busy and enriched > 0,
+        "enrich_label": "Enriching records…" if run["status"] == "enriching" else "Enrich records",
+        "automation_label": "Automation running…" if run["status"] == "collecting" else "Start web automation",
+    }
 
 
 def _page(request: Request, selected_run: int | None = None) -> str:
@@ -463,7 +607,7 @@ def _page(request: Request, selected_run: int | None = None) -> str:
         str(row.get("servicenow_customer") or "").casefold() == "yes" for row in rows
     )
     attention_count = sum(
-        str(row.get("check_status") or "").casefold() in {"error", "manual_review"}
+        str(row.get("check_status") or "").casefold() in {"apollo_failed", "error", "manual_review"}
         or str(row.get("resolution_status") or "") not in TRUSTED_COMPANY_STATUSES
         for row in rows
     )
@@ -474,30 +618,42 @@ def _page(request: Request, selected_run: int | None = None) -> str:
         <div><strong>{integration_count}</strong><span>Integration app matches</span></div>
         <div><strong>{attention_count}</strong><span>Need attention</span></div>
       </div>"""
-    enriched_count = sum(row.get("check_status") is not None for row in rows)
-    automation_count = sum(
-        str(row.get("check_status") or "").casefold() in {"completed", "manual_review", "error"}
-        for row in rows
+    enriched_count, automation_count, approved_count = _workflow_counts(rows)
+    enrichment_processed_count = _enrichment_processed_count(rows)
+    failed_enrichment_count = sum(
+        str(row.get("check_status") or "").casefold() == "apollo_failed" for row in rows
     )
-    approved_count = sum(
-        str(row.get("resolution_status") or "") in TRUSTED_COMPANY_STATUSES for row in rows
+    completed_count = sum(
+        str(row.get("check_status") or "").casefold() == "completed" for row in rows
     )
+    overview_stats = f"""
+      <div class="overview-stats" aria-label="Run summary">
+        <div class="overview-stat"><span class="stat-icon records" aria-hidden="true">{len(rows)}</span><div><strong>{len(rows)}</strong><span>People in run</span></div></div>
+        <div class="overview-stat"><span class="stat-icon approved" aria-hidden="true">✓</span><div><strong>{approved_count}</strong><span>Companies approved</span></div></div>
+        <div class="overview-stat"><span class="stat-icon checked" aria-hidden="true">↗</span><div><strong>{completed_count}</strong><span>Checks completed</span></div></div>
+        <div class="overview-stat"><span class="stat-icon confirmed" aria-hidden="true">◆</span><div><strong>{confirmed_count}</strong><span>Relationships found</span></div></div>
+      </div>"""
 
     workflow_steps = '<div class="empty-state"><strong>No active run</strong><span>Upload a CSV to start the workflow.</span></div>'
     run_log = ""
     if run:
         busy = run["status"] in {"enriching", "collecting"}
-        enrichment_complete = enriched_count > 0
-        automation_complete = automation_count > 0
+        enrichment_total = approved_count or len(rows)
+        automation_total = enriched_count
+        enrichment_complete = approved_count > 0 and enrichment_processed_count >= approved_count
+        automation_complete = automation_total > 0 and automation_count >= automation_total
         final_complete = run["status"] == "completed"
+        enrichment_percent = round(100 * enrichment_processed_count / enrichment_total) if enrichment_total else 0
+        automation_percent = round(100 * automation_count / automation_total) if automation_total else 0
         step_one_state = "active" if run["status"] == "enriching" or not enrichment_complete else "complete"
         step_two_state = (
-            "active" if run["status"] == "collecting" or (enrichment_complete and not automation_complete)
+            "locked" if run["status"] == "enriching"
+            else "active" if run["status"] == "collecting" or (enriched_count > 0 and not automation_complete)
             else "complete" if automation_complete else "locked"
         )
         step_three_state = "complete" if final_complete else "active" if automation_complete else "locked"
         enrich_disabled = "disabled" if busy else ""
-        automation_disabled = "disabled" if busy or not enrichment_complete else ""
+        automation_disabled = "disabled" if busy or not enriched_count else ""
         final_disabled = "disabled" if busy or not automation_complete else ""
         enrich_label = "Enriching records…" if run["status"] == "enriching" else "Enrich records"
         automation_label = "Automation running…" if run["status"] == "collecting" else "Start web automation"
@@ -507,21 +663,24 @@ def _page(request: Request, selected_run: int | None = None) -> str:
             else '<span class="button disabled-link" aria-disabled="true">Download CSV</span>'
         )
         workflow_steps = f"""
-          <div class="workflow-progress">
-            <article class="workflow-step {step_one_state}">
-              <div class="step-top"><span class="step-number">{'✓' if enrichment_complete else '1'}</span><span class="step-state">{approved_count}/{len(rows)} approved</span></div>
+          <div class="workflow-progress" id="workflow-progress" data-run-id="{selected_run}" data-busy="{str(busy).lower()}">
+            <article class="workflow-step {step_one_state}" data-stage-card="enrich">
+              <div class="step-top"><span class="step-number" data-step-number="enrich">{'✓' if enrichment_complete else '1'}</span><span class="step-state" data-approved-count>{approved_count}/{len(rows)} approved</span></div>
               <h3>Enrich records</h3>
               <p>Resolve each LinkedIn profile and enrich its company with Apollo.</p>
-              <div class="step-metric"><strong>{enriched_count}</strong><span>of {len(rows)} records enriched</span></div>
-              <form method="post" action="/runs/{selected_run}/enrich"><button class="primary step-action" {enrich_disabled}>{enrich_label}</button></form>
+              <div class="step-metric"><strong data-enriched-count>{enrichment_processed_count}</strong><span>of <span data-enrichment-total>{enrichment_total}</span> processed<span data-enrichment-failures>{f' · {failed_enrichment_count} needs attention' if failed_enrichment_count else ''}</span></span></div>
+              <div class="stage-progress" role="progressbar" aria-label="Enrichment progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{enrichment_percent}" data-progress="enrich"><span style="width:{enrichment_percent}%"></span></div>
+              <form class="async-stage-form" data-stage="enrich" method="post" action="/runs/{selected_run}/enrich"><button class="primary step-action" {enrich_disabled}>{enrich_label}</button></form>
             </article>
-            <article class="workflow-step {step_two_state}">
-              <div class="step-top"><span class="step-number">{'✓' if automation_complete else '2'}</span><span class="step-state">{automation_count}/{len(rows)} checked</span></div>
+            <article class="workflow-step {step_two_state}" data-stage-card="automation">
+              <div class="step-top"><span class="step-number" data-step-number="automation">{'✓' if automation_complete else '2'}</span><span class="step-state" data-automation-state>{automation_count}/{automation_total} checked</span></div>
               <h3>Run web automation</h3>
               <p>Open ServiceNow, sign in, then start the browser checks using saved enrichment.</p>
+              <div class="step-metric automation-metric"><strong data-automation-count>{automation_count}</strong><span>of <span data-automation-total>{automation_total}</span> ready records checked</span></div>
+              <div class="stage-progress" role="progressbar" aria-label="Web automation progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{automation_percent}" data-progress="automation"><span style="width:{automation_percent}%"></span></div>
               <div class="step-actions">
                 <form method="post" action="/runs/{selected_run}/launch-browser"><button {automation_disabled}>Open ServiceNow</button></form>
-                <form method="post" action="/runs/{selected_run}/collect"><button class="primary" {automation_disabled}>{automation_label}</button></form>
+                <form class="async-stage-form" data-stage="automation" method="post" action="/runs/{selected_run}/collect"><button class="primary" {automation_disabled}>{automation_label}</button></form>
               </div>
             </article>
             <article class="workflow-step {step_three_state}">
@@ -537,7 +696,7 @@ def _page(request: Request, selected_run: int | None = None) -> str:
         if run["collection_log"]:
             run_log = f'<details class="run-log"><summary>View latest run log</summary><pre>{_escape(run["collection_log"])}</pre></details>'
 
-    default_tab = "final" if automation_count else "automation" if enriched_count else "enriched"
+    default_tab = "enriched"
     enriched_active = default_tab == "enriched"
     automation_active = default_tab == "automation"
     final_active = default_tab == "final"
@@ -549,36 +708,31 @@ def _page(request: Request, selected_run: int | None = None) -> str:
     record_tabs = f"""
       <div class="record-tabs" role="tablist" aria-label="Workflow records">
         <button type="button" class="tab-button {'active' if enriched_active else ''}" role="tab" aria-selected="{str(enriched_active).lower()}" aria-controls="panel-enriched" id="tab-enriched" data-tab="enriched">
-          <span>Enriched records</span><strong>{enriched_count}/{len(rows)}</strong>
+          <span>Enriched records</span><strong data-tab-count="enriched">{enriched_count}/{len(rows)}</strong>
         </button>
         <button type="button" class="tab-button {'active' if automation_active else ''}" role="tab" aria-selected="{str(automation_active).lower()}" aria-controls="panel-automation" id="tab-automation" data-tab="automation">
-          <span>Web automation</span><strong>{automation_count}/{len(rows)}</strong>
+          <span>Web automation</span><strong data-tab-count="automation">{automation_count}/{len(rows)}</strong>
         </button>
         <button type="button" class="tab-button {'active' if final_active else ''}" role="tab" aria-selected="{str(final_active).lower()}" aria-controls="panel-final" id="tab-final" data-tab="final">
-          <span>Final table</span><strong>{confirmed_count}/{len(rows)}</strong>
+          <span>Final table</span><strong data-tab-count="final">{confirmed_count}/{len(rows)}</strong>
         </button>
       </div>
       <div class="tab-panel" id="panel-enriched" role="tabpanel" aria-labelledby="tab-enriched" {'hidden' if not enriched_active else ''}>
         <div class="panel-heading"><div><h3>Enriched records</h3><p>Identity, Apollo company resolution, approval status, and organization data.</p></div></div>
-        {_enrichment_table(rows)}
+        <div data-workspace-table="enriched">{_enrichment_table(rows)}</div>
       </div>
       <div class="tab-panel" id="panel-automation" role="tabpanel" aria-labelledby="tab-automation" {'hidden' if not automation_active else ''}>
         <div class="panel-heading"><div><h3>Web automation</h3><p>ServiceNow browser-check progress, matches, confidence, and screenshots.</p></div></div>
-        {_automation_table(rows)}
+        <div data-workspace-table="automation">{_automation_table(rows)}</div>
       </div>
       <div class="tab-panel" id="panel-final" role="tabpanel" aria-labelledby="tab-final" {'hidden' if not final_active else ''}>
         <div class="panel-heading"><div><h3>Final results</h3><p>Combined ServiceNow result, verification sources, and n8n delivery status.</p></div>{final_export}</div>
-        {report_stats}
-        {_final_results_table(rows)}
+        <div data-report-stats>{report_stats}</div>
+        <div data-workspace-table="final">{_final_results_table(rows)}</div>
       </div>"""
 
-    refresh = (
-        '<meta http-equiv="refresh" content="12">'
-        if run and run["status"] in {"enriching", "collecting"}
-        else ""
-    )
     return f"""<!doctype html>
-    <html><head><meta charset="utf-8">{refresh}<title>ServiceNow Partner Workflow</title>
+    <html><head><meta charset="utf-8"><title>ServiceNow Partner Workflow</title>
     <style>
       * {{ box-sizing:border-box; }}
       body {{ font-family:Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; max-width:1440px; margin:0 auto; color:#172033; padding:38px 20px 64px; background:#f5f7fb; }}
@@ -654,22 +808,132 @@ def _page(request: Request, selected_run: int | None = None) -> str:
       @media (max-width:950px) {{ .workflow-progress {{ grid-template-columns:1fr; }} .workflow-step {{ min-height:0; }} .workflow-step p {{ min-height:0; }} .step-metric {{ margin-top:4px; }} }}
       @media (max-width:850px) {{ .page-header, .upload-section, .section-heading {{ align-items:flex-start; flex-direction:column; }} .report-stats {{ grid-template-columns:1fr 1fr; }} .report-card summary {{ grid-template-columns:1fr auto; }} .source-tags {{ grid-column:1 / -1; }} .relationship {{ justify-self:end; }} .expand-label {{ grid-column:2; grid-row:2; }} .detail-grid, .evidence-section {{ grid-template-columns:1fr; }} }}
       @media (max-width:520px) {{ body {{ padding:24px 10px 40px; }} section {{ border-radius:12px; padding:16px; }} .upload-section form {{ align-items:stretch; flex-direction:column; width:100%; }} .upload-section input, .upload-section button {{ width:100%; }} .records-workspace {{ padding:0; }} .records-heading {{ padding:18px 16px 0; }} .record-tabs {{ padding-left:16px; padding-right:16px; }} .tab-panel {{ padding:0 16px 16px; }} .report-card summary {{ padding:15px; gap:12px; }} .show-more, .show-less {{ display:none !important; }} dl > div {{ grid-template-columns:1fr; gap:3px; }} }}
+
+      /* Refined dashboard shell */
+      :root {{
+        color-scheme:light;
+        --ink:#14213d;
+        --muted:#64748b;
+        --line:#e3e9f2;
+        --brand:#2563eb;
+        --brand-dark:#1d4ed8;
+        --navy:#0b1739;
+        --canvas:#f4f7fb;
+        --success:#15946b;
+      }}
+      body {{ max-width:1520px; padding:28px 28px 60px; color:var(--ink); background:#f8f9fd; }}
+      body::before {{ display:none; }}
+      h1, h2, h3 {{ font-family:Manrope, Inter, ui-sans-serif, system-ui, sans-serif; }}
+      h1, h2, h3, p {{ text-wrap:pretty; }}
+      section {{ border-color:#e2e8f0; border-radius:14px; box-shadow:0 8px 24px rgba(30,41,59,.045); }}
+      .page-header {{ position:relative; overflow:hidden; align-items:center; min-height:116px; padding:24px 26px; margin-bottom:16px; border:1px solid #e2e8f0; border-radius:14px; color:var(--ink); background:#fff; box-shadow:0 8px 24px rgba(30,41,59,.05); }}
+      .page-header::before {{ content:""; position:absolute; inset:0 auto 0 0; width:4px; background:linear-gradient(#2563eb,#0f766e); }}
+      .brand-lockup {{ position:relative; z-index:1; display:flex; align-items:center; gap:20px; }}
+      .brand-mark {{ display:grid; place-items:center; flex:0 0 auto; width:48px; height:48px; border:1px solid #1d4ed8; border-radius:12px; color:#fff; background:#2563eb; box-shadow:0 7px 16px rgba(37,99,235,.18); font-size:14px; font-weight:850; letter-spacing:-.04em; }}
+      .eyebrow {{ display:block; margin-bottom:5px; color:#2563eb; font-size:10px; font-weight:800; letter-spacing:.14em; text-transform:uppercase; }}
+      .page-header h1 {{ margin:0 0 5px; color:#0f172a; font-size:clamp(25px,2.4vw,34px); line-height:1.1; }}
+      .page-header p {{ max-width:720px; color:#64748b; font-size:13px; line-height:1.5; }}
+      .header-meta {{ position:relative; z-index:1; display:flex; align-items:center; }}
+      .live-indicator {{ display:inline-flex; align-items:center; gap:8px; padding:8px 11px; border:1px solid #cce9dd; border-radius:999px; background:#effaf5; color:#12694f; font-size:11px; font-weight:750; }}
+      .live-indicator i {{ width:7px; height:7px; border-radius:50%; background:#16a374; box-shadow:0 0 0 4px rgba(22,163,116,.12); }}
+      .overview-stats {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin:18px 0; }}
+      .overview-stat {{ display:flex; align-items:center; gap:13px; min-width:0; padding:16px 17px; border:1px solid #e2e8f0; border-radius:12px; background:#fff; box-shadow:0 5px 16px rgba(30,41,59,.035); }}
+      .overview-stat > div {{ display:flex; min-width:0; flex-direction:column; }}
+      .overview-stat strong {{ font-size:23px; line-height:1.1; letter-spacing:-.035em; }}
+      .overview-stat > div span {{ margin-top:3px; color:var(--muted); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+      .stat-icon {{ display:grid; place-items:center; flex:0 0 auto; width:38px; height:38px; border-radius:12px; background:#edf4ff; color:#2563eb; font-size:12px; font-weight:850; }}
+      .stat-icon.approved {{ background:#eaf9f3; color:#14845f; font-size:17px; }} .stat-icon.checked {{ background:#f2edff; color:#7652d6; font-size:18px; }} .stat-icon.confirmed {{ background:#fff3e5; color:#d17312; font-size:13px; }}
+      .upload-section {{ position:relative; overflow:hidden; align-items:center; padding:20px 24px; border-color:#cbdcf7; background:#f5f9ff; }}
+      .upload-section::after {{ display:none; }}
+      .upload-copy {{ position:relative; z-index:1; display:flex; align-items:center; gap:14px; }}
+      .upload-icon {{ display:grid; place-items:center; flex:0 0 auto; width:44px; height:44px; border-radius:13px; background:#e9f2ff; color:#2563eb; }}
+      .upload-icon svg {{ width:21px; height:21px; }}
+      .upload-copy h2 {{ color:var(--ink); font-size:16px; }}
+      .upload-section form {{ position:relative; z-index:1; gap:10px; }}
+      input[type="file"] {{ max-width:300px; padding:5px; color:#637087; background:#fff; }}
+      input[type="file"]::file-selector-button {{ margin-right:10px; padding:8px 11px; border:0; border-radius:7px; background:#edf2f8; color:#34435c; font:inherit; font-size:12px; font-weight:750; cursor:pointer; }}
+      input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible, summary:focus-visible {{ outline:3px solid rgba(37,99,235,.22); outline-offset:2px; }}
+      button, .button {{ min-height:38px; border-color:#d9e1ec; border-radius:9px; background:#f8fafc; transition:background .15s, border-color .15s, transform .15s, box-shadow .15s; }}
+      button:hover, .button:hover {{ border-color:#c9d4e2; background:#f0f4f8; transform:translateY(-1px); }}
+      button.primary, .primary-link {{ border-color:var(--brand); background:var(--brand); box-shadow:0 6px 14px rgba(37,99,235,.18); }}
+      button.primary:hover, .primary-link:hover {{ border-color:var(--brand-dark); background:var(--brand-dark); box-shadow:0 8px 18px rgba(37,99,235,.22); }}
+      .message {{ margin:18px 0; border:1px solid transparent; font-size:13px; font-weight:650; }} .message.success {{ border-color:#bcebd8; color:#11694e; background:#eafaf4; }} .message.error {{ border-color:#fac8c4; color:#9b302b; background:#fff0ef; }}
+      .workflow-section {{ padding:24px; }}
+      .section-heading {{ align-items:flex-end; }} .section-heading h2, .records-heading h2 {{ font-size:20px; }}
+      .section-kicker {{ display:block; margin-bottom:5px; color:#2563eb; font-size:10px; font-weight:850; letter-spacing:.13em; text-transform:uppercase; }}
+      .run-picker {{ flex-wrap:wrap; justify-content:flex-end; padding:6px 7px 6px 11px; border:1px solid #e0e6ef; border-radius:12px; background:#f8fafc; }}
+      .run-picker select {{ max-width:310px; border:0; background:transparent; font-size:12px; font-weight:700; }}
+      .run-status {{ background:#e5f5ff; color:#17658d; }}
+      .workflow-progress {{ gap:18px; }}
+      .workflow-step {{ min-height:255px; padding:21px; border-color:#e1e7f0; border-top-width:1px; border-radius:12px; background:#f8fafc; }}
+      .workflow-step::before {{ content:""; position:absolute; inset:0; border-radius:inherit; pointer-events:none; box-shadow:inset 0 3px 0 #d3dce8; }}
+      .workflow-step.active {{ border-color:#bfd4f7; background:#fff; box-shadow:0 10px 24px rgba(37,99,235,.08); }} .workflow-step.active::before {{ box-shadow:inset 0 3px 0 #2563eb; }}
+      .workflow-step.complete {{ border-color:#cceadd; background:#fff; }} .workflow-step.complete::before {{ box-shadow:inset 0 3px 0 #1aa173; }}
+      .workflow-step.locked {{ opacity:.62; }}
+      .workflow-step:not(:last-child)::after {{ content:"→"; position:absolute; z-index:2; right:-27px; top:48%; display:grid; place-items:center; width:34px; height:34px; border:5px solid #fff; border-radius:50%; color:#8b99ad; background:#edf1f6; font-size:15px; font-weight:800; }}
+      .step-number {{ width:32px; height:32px; border:1px solid #dfe5ed; background:#fff; }}
+      .step-state {{ padding:5px 8px; border-radius:999px; background:#edf1f6; color:#66758a; font-size:10px; letter-spacing:.02em; }}
+      .workflow-step.active .step-state {{ background:#e8f1ff; color:#245ca9; }} .workflow-step.complete .step-state {{ background:#e6f7ef; color:#157051; }}
+      .workflow-step h3 {{ margin-top:20px; font-size:17px; }} .workflow-step p {{ color:#65738a; }}
+      .stage-progress {{ position:relative; width:100%; height:7px; margin:0 0 15px; overflow:hidden; border-radius:999px; background:#e6ebf2; }}
+      .stage-progress > span {{ display:block; width:0; height:100%; border-radius:inherit; background:#2563eb; transition:width .35s ease; }}
+      .workflow-step.complete .stage-progress > span {{ background:#15946b; }}
+      .automation-metric {{ margin-top:auto; }}
+      .records-workspace {{ border-radius:14px; }}
+      .records-heading {{ padding:24px 24px 2px; }}
+      .record-tabs {{ gap:8px; margin:14px 24px 0; padding:5px; border:1px solid #e1e7ef; border-radius:12px; background:#f4f7fa; }}
+      .tab-button {{ flex:0 0 auto; justify-content:center; min-height:40px; padding:9px 13px; border:0; border-radius:8px; }} .tab-button.active {{ border:0; background:#fff; color:#1f5eb8; box-shadow:0 3px 10px rgba(34,51,80,.09); }}
+      .tab-panel {{ padding-top:2px; }}
+      .table-scroll {{ border-radius:13px; }} .data-table th {{ position:sticky; top:0; z-index:1; padding:12px 14px; background:#f6f8fb; }} .data-table td {{ padding:14px; }}
+      .data-table tbody tr {{ transition:background .12s; }} .data-table tbody tr:hover {{ background:#f7faff; }}
+      .final-records {{ overflow:hidden; border:1px solid #e2e7ef; border-radius:13px; background:#fff; }}
+      .final-record-header, .final-record-summary {{ display:grid; grid-template-columns:minmax(210px,1.25fr) minmax(130px,.7fr) minmax(125px,.65fr) minmax(190px,1fr) minmax(120px,.65fr) 105px; align-items:center; gap:14px; }}
+      .final-record-header {{ padding:12px 14px; border-bottom:1px solid #dfe5ed; color:#69758a; background:#f6f8fb; font-size:11px; font-weight:750; letter-spacing:.035em; text-transform:uppercase; }}
+      .final-record {{ border-bottom:1px solid #edf0f4; background:#fff; }} .final-record:last-child {{ border-bottom:0; }}
+      .final-record-summary {{ min-height:72px; padding:13px 14px; list-style:none; cursor:pointer; transition:background .15s; }} .final-record-summary::-webkit-details-marker {{ display:none; }} .final-record-summary:hover {{ background:#f7faff; }}
+      .final-record[open] > .final-record-summary {{ background:#f4f8ff; }}
+      .final-cell {{ min-width:0; font-size:13px; }} .record-person {{ display:block; }}
+      .record-expand {{ display:flex; align-items:center; justify-content:flex-end; gap:7px; color:#2563eb; font-size:11px; font-weight:750; white-space:nowrap; }}
+      .record-expand .chevron {{ font-size:17px; transition:transform .15s; }} .final-record[open] .record-expand .chevron {{ transform:rotate(180deg); }}
+      .final-record[open] .expand-text {{ font-size:0; }} .final-record[open] .expand-text::after {{ content:"Hide record"; font-size:11px; }}
+      .final-record-details {{ padding:20px; border-top:1px solid #e0e8f3; background:#f8fafc; }}
+      .final-record-facts {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:1px; overflow:hidden; margin-bottom:14px; border:1px solid #e2e8f0; border-radius:10px; background:#e2e8f0; }}
+      .final-record-facts > div {{ display:flex; min-width:0; flex-direction:column; gap:5px; padding:13px 14px; background:#fff; }}
+      .final-record-facts span {{ color:#718096; font-size:10px; font-weight:750; letter-spacing:.05em; text-transform:uppercase; }} .final-record-facts strong {{ overflow-wrap:anywhere; font-size:12px; }}
+      .final-record-evidence {{ display:grid; grid-template-columns:minmax(0,1.35fr) minmax(260px,.65fr); gap:14px; }}
+      .final-evidence-card {{ min-width:0; padding:16px; border:1px solid #e2e8f0; border-radius:10px; background:#fff; }}
+      .evidence-title {{ display:flex; flex-direction:column; gap:3px; margin-bottom:12px; }} .evidence-title > span {{ font-size:13px; font-weight:800; }} .evidence-title small {{ font-size:11px; }}
+      .screenshot-evidence img {{ display:block; width:100%; max-height:280px; object-fit:cover; object-position:top; border:1px solid #dce3ec; border-radius:8px; }}
+      .verification-card p {{ margin:0; color:#56657a; font-size:12px; line-height:1.55; }} .evidence-empty {{ display:flex; align-items:center; }} .evidence-empty .evidence-title {{ margin:0; }}
+      .status-pill, .source-tag, .relationship {{ border:1px solid transparent; }}
+      .status-pill.success, .status-pill.positive, .relationship.positive {{ border-color:#c8ebdc; }} .status-pill.warning, .relationship.warning {{ border-color:#f3ddb1; }}
+      .maintenance {{ padding:4px 8px; }}
+      .maintenance > summary {{ color:#78859a; }}
+      @media (prefers-reduced-motion:reduce) {{ *, *::before, *::after {{ scroll-behavior:auto !important; transition:none !important; animation:none !important; }} button:hover, .button:hover {{ transform:none; }} }}
+      @media (max-width:950px) {{ .workflow-step:not(:last-child)::after {{ content:"↓"; right:auto; left:50%; top:auto; bottom:-27px; transform:translateX(-50%); }} }}
+      @media (max-width:1050px) {{ .final-record-header {{ display:none; }} .final-record-summary {{ grid-template-columns:minmax(210px,1fr) repeat(2,minmax(120px,.6fr)) 90px; }} .final-record-summary .final-cell:nth-child(4), .final-record-summary .final-cell:nth-child(5) {{ display:none; }} .final-record-facts {{ grid-template-columns:1fr 1fr; }} }}
+      @media (max-width:850px) {{ body {{ padding:18px 16px 48px; }} .page-header {{ min-height:auto; padding:25px; }} .header-meta {{ margin-left:76px; }} .overview-stats {{ grid-template-columns:1fr 1fr; }} .upload-section::after {{ display:none; }} .run-picker {{ align-items:stretch; width:100%; justify-content:flex-start; }} .run-picker select {{ flex:1; max-width:none; }} .final-record-evidence {{ grid-template-columns:1fr; }} }}
+      @media (max-width:520px) {{ body {{ padding:10px 10px 38px; }} .page-header {{ padding:22px 18px; border-radius:14px; }} .brand-lockup {{ align-items:flex-start; gap:12px; }} .brand-mark {{ width:44px; height:44px; border-radius:12px; font-size:13px; }} .page-header h1 {{ font-size:25px; }} .header-meta {{ margin:16px 0 0 56px; }} .overview-stats {{ grid-template-columns:1fr; gap:8px; }} .overview-stat {{ padding:13px 15px; }} .upload-section {{ padding:17px; }} .upload-copy {{ align-items:flex-start; }} .upload-section form {{ gap:8px; margin-top:14px; }} input[type="file"] {{ max-width:none; }} .workflow-section {{ padding:18px 15px; }} .run-picker {{ padding:8px; }} .run-picker label {{ width:100%; }} .run-picker select {{ width:100%; }} .record-tabs {{ margin-left:16px; margin-right:16px; }} .tab-button {{ min-width:max-content; }} .final-record-summary {{ grid-template-columns:1fr auto; gap:10px; }} .final-record-summary .final-cell:nth-child(2), .final-record-summary .final-cell:nth-child(3) {{ display:none; }} .record-expand {{ grid-column:2; grid-row:1; }} .final-record-details {{ padding:13px; }} .final-record-facts {{ grid-template-columns:1fr; }} }}
     </style></head><body>
-      <header class="page-header"><div><h1>ServiceNow Partner Workflow</h1><p class="muted">Move from LinkedIn profiles to verified ServiceNow results in three clear stages.</p></div></header>
+      <header class="page-header">
+        <div class="brand-lockup"><div class="brand-mark" aria-hidden="true">SN</div><div><span class="eyebrow">Partner intelligence</span><h1>Customer verification workspace</h1><p>Turn LinkedIn profiles into verified ServiceNow relationships with one guided, evidence-backed workflow.</p></div></div>
+        <div class="header-meta"><span class="live-indicator"><i aria-hidden="true"></i>Workflow dashboard</span></div>
+      </header>
       {_message(request)}
-      <section class="upload-section"><div class="upload-copy"><h2>Upload people CSV</h2>
-        <p class="muted">Required: person name and LinkedIn URL. Apollo data alone is used for automatic company resolution.</p></div>
-        <form method="post" action="/runs" enctype="multipart/form-data"><input type="file" name="file" accept=".csv,text/csv" required><button class="primary">Upload CSV</button></form>
+      {overview_stats}
+      <section class="upload-section"><div class="upload-copy"><span class="upload-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span><div><span class="section-kicker">Start a new run</span><h2>Upload people CSV</h2>
+        <p class="muted">Include each person’s name and LinkedIn URL. Apollo data is used for automatic company resolution.</p></div></div>
+        <form method="post" action="/runs" enctype="multipart/form-data"><input type="file" name="file" accept=".csv,text/csv" aria-label="Choose people CSV" required><button class="primary">Upload CSV</button></form>
       </section>
       <section class="workflow-section">
-        <div class="section-heading"><div><h2>Workflow progress</h2><p class="muted">Complete each stage from left to right.</p></div>
+        <div class="section-heading"><div><span class="section-kicker">3-stage pipeline</span><h2>Workflow progress</h2><p class="muted">Complete each stage from left to right.</p></div>
           <form class="run-picker" method="get" action="/"><label for="run-select">Current run</label><select id="run-select" name="run_id" onchange="this.form.submit()">{options}</select>{f'<span class="run-status">{_pretty_status(run["status"])}</span>' if run else ''}</form>
         </div>
         {workflow_steps}
         {run_log}
       </section>
       <section class="records-workspace">
-        <div class="records-heading"><h2>Records</h2><p class="muted">Switch views to inspect the data produced at each workflow stage.</p></div>
+        <div class="records-heading"><span class="section-kicker">Run data</span><h2>Records</h2><p class="muted">Switch views to inspect the data produced at each workflow stage.</p></div>
         {record_tabs}
       </section>
       <details class="maintenance"><summary>Database maintenance</summary><div class="maintenance-body"><p>Clears local workflow runs and reports only. CSV files, configuration, Chrome profile, and source code remain unchanged.</p><form method="post" action="/database/clear" onsubmit="return confirm('Delete every local workflow run and report? This cannot be undone.');"><button>Clear database</button></form></div></details>
@@ -689,6 +953,107 @@ def _page(request: Request, selected_run: int | None = None) -> str:
         tabButtons.forEach(button => button.addEventListener('click', () => activateTab(button.dataset.tab)));
         const requestedTab = location.hash.slice(1);
         if (requestedTab) activateTab(requestedTab, false);
+
+        const workflowProgress = document.getElementById('workflow-progress');
+        let progressTimer = null;
+        let workflowWasBusy = workflowProgress?.dataset.busy === 'true';
+
+        function setText(selector, value) {{
+          const element = document.querySelector(selector);
+          if (element) element.textContent = value;
+        }}
+
+        function applyProgress(data) {{
+          const enrichCard = document.querySelector('[data-stage-card="enrich"]');
+          const automationCard = document.querySelector('[data-stage-card="automation"]');
+          [[enrichCard, data.enrich_state], [automationCard, data.automation_state]].forEach(([card, state]) => {{
+            if (!card) return;
+            card.classList.remove('active', 'complete', 'locked');
+            card.classList.add(state);
+          }});
+          setText('[data-step-number="enrich"]', data.enrichment_complete ? '✓' : '1');
+          setText('[data-step-number="automation"]', data.automation_complete ? '✓' : '2');
+          setText('[data-approved-count]', `${{data.approved}}/${{data.total}} approved`);
+          setText('[data-enriched-count]', data.processed);
+          setText('[data-enrichment-total]', data.target);
+          setText('[data-enrichment-failures]', data.failed_enrichment ? ` · ${{data.failed_enrichment}} needs attention` : '');
+          setText('[data-automation-count]', data.automated);
+          setText('[data-automation-total]', data.automation_target);
+          setText('[data-automation-state]', `${{data.automated}}/${{data.automation_target}} checked`);
+          setText('[data-tab-count="enriched"]', `${{data.enriched}}/${{data.total}}`);
+          setText('[data-tab-count="automation"]', `${{data.automated}}/${{data.total}}`);
+          setText('[data-tab-count="final"]', `${{data.confirmed}}/${{data.total}}`);
+          setText('.run-status', data.run_status_label);
+
+          [['enrich', data.enrichment_percent], ['automation', data.automation_percent]].forEach(([stage, percent]) => {{
+            const progress = document.querySelector(`[data-progress="${{stage}}"]`);
+            if (!progress) return;
+            progress.setAttribute('aria-valuenow', String(percent));
+            const fill = progress.querySelector('span');
+            if (fill) fill.style.width = `${{percent}}%`;
+          }});
+
+          const enrichButton = document.querySelector('.async-stage-form[data-stage="enrich"] button');
+          const automationButton = document.querySelector('.async-stage-form[data-stage="automation"] button');
+          const openBrowserButton = document.querySelector('[data-stage-card="automation"] .step-actions form:not(.async-stage-form) button');
+          if (enrichButton) {{ enrichButton.disabled = !data.can_enrich; enrichButton.textContent = data.enrich_label; }}
+          if (automationButton) {{ automationButton.disabled = !data.can_automate; automationButton.textContent = data.automation_label; }}
+          if (openBrowserButton) openBrowserButton.disabled = !data.can_automate;
+        }}
+
+        async function refreshWorkspace(runId) {{
+          const response = await fetch(`/api/runs/${{runId}}/workspace`, {{cache:'no-store'}});
+          if (!response.ok) return;
+          const workspace = await response.json();
+          Object.entries(workspace).forEach(([name, markup]) => {{
+            const target = document.querySelector(`[data-workspace-table="${{name}}"]`);
+            if (target) target.innerHTML = markup;
+          }});
+        }}
+
+        async function pollProgress() {{
+          if (!workflowProgress) return;
+          progressTimer = null;
+          const runId = workflowProgress.dataset.runId;
+          try {{
+            const response = await fetch(`/api/runs/${{runId}}/progress`, {{cache:'no-store'}});
+            if (!response.ok) throw new Error('Progress request failed');
+            const data = await response.json();
+            const finished = workflowWasBusy && !data.busy;
+            applyProgress(data);
+            workflowWasBusy = data.busy;
+            if (finished) await refreshWorkspace(runId);
+            if (data.busy) progressTimer = window.setTimeout(pollProgress, 1000);
+          }} catch (_error) {{
+            if (workflowWasBusy) progressTimer = window.setTimeout(pollProgress, 2000);
+          }}
+        }}
+
+        document.querySelectorAll('.async-stage-form').forEach(form => {{
+          form.addEventListener('submit', event => {{
+            event.preventDefault();
+            const button = form.querySelector('button');
+            if (!button || button.disabled) return;
+            button.disabled = true;
+            button.textContent = form.dataset.stage === 'enrich' ? 'Starting enrichment…' : 'Starting automation…';
+            workflowWasBusy = true;
+            if (progressTimer) window.clearTimeout(progressTimer);
+            const startRequest = fetch(form.action, {{method:'POST', redirect:'follow'}});
+            progressTimer = window.setTimeout(pollProgress, 250);
+            startRequest.then(() => {{
+              if (!workflowWasBusy) {{
+                workflowWasBusy = true;
+                pollProgress();
+              }}
+            }}).catch(() => {{
+              workflowWasBusy = false;
+              if (progressTimer) window.clearTimeout(progressTimer);
+              button.disabled = false;
+              button.textContent = form.dataset.stage === 'enrich' ? 'Enrich records' : 'Start web automation';
+            }});
+          }});
+        }});
+        if (workflowProgress) pollProgress();
       </script>
     </body></html>"""
 
@@ -742,8 +1107,9 @@ def set_company_override(
         person_id,
         company_name=company,
         status="manual_verified",
-        error="Company supplied through dashboard override",
+        error="",
     )
+    DATABASE.reset_check_for_company_change(person_id, run_id, company)
     DATABASE.update_run(run_id, status="needs_enrichment")
     return RedirectResponse(
         url=f"/?run_id={run_id}&message=Company+override+saved",
@@ -786,7 +1152,11 @@ def collect(run_id: int, background_tasks: BackgroundTasks) -> RedirectResponse:
         return RedirectResponse(
             url=f"/?run_id={run_id}&message=This+run+is+already+busy", status_code=303
         )
-    if run["status"] in {"uploaded", "needs_enrichment"}:
+    ready_rows = any(
+        str(row.get("check_status") or "").casefold() in ENRICHED_CHECK_STATUSES
+        for row in DATABASE.report_rows(run_id)
+    )
+    if not ready_rows:
         return RedirectResponse(
             url=f"/?run_id={run_id}&kind=error&message=Click+Enrich+records+first",
             status_code=303,
@@ -820,6 +1190,25 @@ def send_to_n8n(run_id: int) -> RedirectResponse:
 @app.get("/api/reports")
 def reports_api(run_id: int | None = None) -> list[dict[str, Any]]:
     return DATABASE.report_rows(run_id)
+
+
+@app.get("/api/runs/{run_id}/progress")
+def run_progress(run_id: int) -> dict[str, Any]:
+    """Small polling payload used by the dashboard without reloading the page."""
+
+    return _run_progress(run_id)
+
+
+@app.get("/api/runs/{run_id}/workspace")
+def run_workspace(run_id: int) -> dict[str, str]:
+    if not DATABASE.run(run_id):
+        raise HTTPException(status_code=404, detail="Run not found")
+    rows = DATABASE.report_rows(run_id)
+    return {
+        "enriched": _enrichment_table(rows),
+        "automation": _automation_table(rows),
+        "final": _final_results_table(rows),
+    }
 
 
 @app.get("/screenshots/{person_id}")

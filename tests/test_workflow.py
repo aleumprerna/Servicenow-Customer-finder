@@ -1,3 +1,4 @@
+import csv
 from pathlib import Path
 
 from clients.apollo import (
@@ -7,7 +8,14 @@ from clients.apollo import (
 )
 from workflow.database import WorkflowDatabase
 from workflow.person_company import PersonCompanyResolver
-from workflow.service import build_pipeline_csv, parse_people_csv, sync_pipeline_results
+from workflow.service import (
+    _pipeline_process,
+    build_automation_checkpoint,
+    build_pipeline_csv,
+    parse_people_csv,
+    resolve_people,
+    sync_pipeline_results,
+)
 
 
 def test_uploaded_linkedin_export_is_normalized() -> None:
@@ -156,6 +164,198 @@ def test_build_pipeline_csv_replaces_stale_checkpoint(
     generated = input_path.read_text(encoding="utf-8")
     assert "example.com" in generated
     assert "linkedin.com/company/example" in generated
+
+
+def test_corrected_companies_are_the_only_rows_queued_for_reenrichment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = WorkflowDatabase(tmp_path / "workflow.db")
+    database.initialize()
+    run_id = database.create_run(
+        "people.csv",
+        [
+            {"person_name": "One", "linkedin_url": "https://linkedin.com/in/one"},
+            {"person_name": "Two", "linkedin_url": "https://linkedin.com/in/two"},
+            {"person_name": "Three", "linkedin_url": "https://linkedin.com/in/three"},
+        ],
+    )
+    people = database.people_for_run(run_id)
+    for person, company in zip(people, ("Stable Corp", "Old Two", "Old Three"), strict=True):
+        database.update_person_resolution(
+            person["id"], company_name=company, status="apollo_structurally_verified"
+        )
+        database.upsert_check(
+            person["id"],
+            run_id,
+            {
+                "company_name": company,
+                "check_status": "apollo_success",
+                "headquarters": "Existing HQ",
+                "country_code": "US",
+            },
+        )
+
+    database.update_person_resolution(
+        people[1]["id"], company_name="Correct Two", status="manual_verified"
+    )
+    database.reset_check_for_company_change(people[1]["id"], run_id, "Correct Two")
+    database.update_person_resolution(
+        people[2]["id"], company_name="Correct Three", status="manual_verified"
+    )
+    database.reset_check_for_company_change(people[2]["id"], run_id, "Correct Three")
+
+    monkeypatch.setattr("workflow.service.RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(
+        "workflow.service.resolve_people",
+        lambda _database, _run_id, _settings: database.people_for_run(run_id),
+    )
+
+    input_path, _output_path, count = build_pipeline_csv(
+        database, run_id, object()  # type: ignore[arg-type]
+    )
+    generated = input_path.read_text(encoding="utf-8")
+
+    assert count == 2
+    assert "Correct Two" in generated
+    assert "Correct Three" in generated
+    assert "Stable Corp" not in generated
+    corrected = database.report_rows(run_id)[1]
+    assert corrected["check_status"] == "pending"
+    assert corrected["headquarters"] == ""
+    assert corrected["servicenow_customer"] == ""
+
+
+def test_repeat_resolution_skips_already_trusted_companies(tmp_path: Path, monkeypatch) -> None:
+    database = WorkflowDatabase(tmp_path / "workflow.db")
+    database.initialize()
+    run_id = database.create_run(
+        "people.csv", [{"person_name": "Ada", "linkedin_url": "https://linkedin.com/in/ada"}]
+    )
+    person = database.people_for_run(run_id)[0]
+    database.update_person_resolution(
+        person["id"], company_name="Stable Corp", status="apollo_structurally_verified"
+    )
+
+    class ApolloMustNotRun:
+        def person_company(self, *_args, **_kwargs):
+            raise AssertionError("trusted people must not be resolved again")
+
+    monkeypatch.setattr("workflow.service._apollo", lambda _settings: ApolloMustNotRun())
+
+    resolved = resolve_people(database, run_id, object())  # type: ignore[arg-type]
+
+    assert resolved[0]["company_name"] == "Stable Corp"
+
+
+def test_noop_enrichment_preserves_the_existing_checkpoint(tmp_path: Path, monkeypatch) -> None:
+    database = WorkflowDatabase(tmp_path / "workflow.db")
+    database.initialize()
+    run_id = database.create_run(
+        "people.csv", [{"person_name": "Ada", "linkedin_url": "https://linkedin.com/in/ada"}]
+    )
+    person = database.people_for_run(run_id)[0]
+    database.update_person_resolution(
+        person["id"], company_name="Stable Corp", status="apollo_structurally_verified"
+    )
+    database.upsert_check(
+        person["id"],
+        run_id,
+        {"company_name": "Stable Corp", "check_status": "apollo_success", "country_code": "US"},
+    )
+    monkeypatch.setattr("workflow.service.RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(
+        "workflow.service.resolve_people",
+        lambda _database, _run_id, _settings: database.people_for_run(run_id),
+    )
+    checkpoint = tmp_path / "runs" / str(run_id) / "companies_checked.csv"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_text("existing checkpoint", encoding="utf-8")
+
+    _input_path, output_path, count = build_pipeline_csv(
+        database, run_id, object()  # type: ignore[arg-type]
+    )
+
+    assert count == 0
+    assert output_path.read_text(encoding="utf-8") == "existing checkpoint"
+
+
+def test_pipeline_process_calls_progress_while_the_stage_is_running(
+    tmp_path: Path, monkeypatch
+) -> None:
+    input_path = tmp_path / "companies.csv"
+    output_path = tmp_path / "companies_checked.csv"
+    input_path.write_text("company_name\nExample\n", encoding="utf-8")
+    progress_calls: list[str] = []
+
+    class Process:
+        def __init__(self, *_args, stdout, **_kwargs) -> None:
+            self.poll_count = 0
+            stdout.write("stage output")
+            stdout.flush()
+
+        def poll(self):
+            self.poll_count += 1
+            return None if self.poll_count == 1 else 0
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr("workflow.service.subprocess.Popen", Process)
+    monkeypatch.setattr("workflow.service.time.sleep", lambda _seconds: None)
+
+    result = _pipeline_process(
+        input_path=input_path,
+        output_path=output_path,
+        stage="--enrich-only",
+        force=True,
+        progress_callback=lambda: progress_calls.append("sync"),
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "stage output"
+    assert progress_calls == ["sync", "sync"]
+
+
+def test_automation_checkpoint_rebuilds_all_ready_rows_after_incremental_enrichment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = WorkflowDatabase(tmp_path / "workflow.db")
+    database.initialize()
+    run_id = database.create_run(
+        "people.csv",
+        [
+            {"person_name": "Done", "linkedin_url": "https://linkedin.com/in/done"},
+            {"person_name": "Ready", "linkedin_url": "https://linkedin.com/in/ready"},
+            {"person_name": "Failed", "linkedin_url": "https://linkedin.com/in/failed"},
+        ],
+    )
+    people = database.people_for_run(run_id)
+    for person, company in zip(people, ("Done Corp", "Ready Corp", "Failed Corp"), strict=True):
+        database.update_person_resolution(
+            person["id"], company_name=company, status="manual_verified"
+        )
+    database.upsert_check(
+        people[0]["id"], run_id,
+        {"company_name": "Done Corp", "check_status": "completed", "country_code": "US"},
+    )
+    database.upsert_check(
+        people[1]["id"], run_id,
+        {"company_name": "Ready Corp", "check_status": "apollo_success", "country_code": "GB"},
+    )
+    database.upsert_check(
+        people[2]["id"], run_id,
+        {"company_name": "Failed Corp", "check_status": "apollo_failed", "country_code": ""},
+    )
+    monkeypatch.setattr("workflow.service.RUNS_DIR", tmp_path / "runs")
+
+    input_path, output_path, count = build_automation_checkpoint(database, run_id)
+
+    with output_path.open(newline="", encoding="utf-8") as file:
+        rows = list(csv.DictReader(file))
+    assert count == 2
+    assert [row["company_name"] for row in rows] == ["Done Corp", "Ready Corp"]
+    assert [row["check_status"] for row in rows] == ["completed", "apollo_success"]
+    assert input_path.exists()
 
 
 def test_csv_headline_does_not_override_structurally_verified_apollo_company() -> None:
