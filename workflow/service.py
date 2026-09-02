@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import time
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 from pathlib import Path
@@ -14,8 +15,11 @@ from typing import Any
 
 import requests
 
+from browser.preparation import PreparationError, prepare_existing_session
+from browser.session_monitor import LoginSessionMonitor
 from clients.apollo import ApolloClient
 from config import PROJECT_ROOT, Settings, load_settings
+from services.csv_service import CSVService
 from workflow.database import WorkflowDatabase, now
 from workflow.person_company import PersonCompanyResolver
 
@@ -422,7 +426,9 @@ def run_enrichment(database: WorkflowDatabase, run_id: int) -> None:
         database.update_run(run_id, status="failed", finished_at=now(), collection_log=str(exc))
 
 
-def run_collection(database: WorkflowDatabase, run_id: int) -> None:
+def run_collection(
+    database: WorkflowDatabase, run_id: int, login_monitor: LoginSessionMonitor | None = None
+) -> None:
     """Run only ServiceNow browser automation against enriched records."""
 
     try:
@@ -438,16 +444,19 @@ def run_collection(database: WorkflowDatabase, run_id: int) -> None:
             )
             return
 
-        process = _pipeline_process(
-            input_path=input_path,
-            output_path=output_path,
-            stage="--automation-only",
-            force=False,
-            progress_callback=lambda: sync_pipeline_results(database, run_id, output_path),
+        process = asyncio.run(
+            _run_collection_in_process(
+                database=database,
+                run_id=run_id,
+                settings=settings,
+                input_path=input_path,
+                output_path=output_path,
+                login_monitor=login_monitor,
+            )
         )
         sync_count = sync_pipeline_results(database, run_id, output_path)
         sent_count = send_negatives_to_n8n(database, run_id, settings)
-        log = (process.stdout + "\n" + process.stderr).strip()[-20_000:]
+        log = process.strip()[-20_000:]
         report_rows = database.report_rows(run_id)
         completed_checks = sum(row["check_status"] == "completed" for row in report_rows)
         people_count = len(report_rows)
@@ -469,8 +478,75 @@ def run_collection(database: WorkflowDatabase, run_id: int) -> None:
             f"negative result(s) to n8n.\n{log}"
         )
         database.update_run(run_id, status=status, finished_at=now(), collection_log=summary)
+        if login_monitor:
+            login_monitor.set_phase(
+                "Ready",
+                "Customer Information is still open and ready for another automation run",
+                tone="ready",
+            )
+    except PreparationError as exc:
+        detail = f"{exc.step}: {exc.detail}"
+        if login_monitor:
+            login_monitor.set_phase("Automation Failed", detail, tone="failed")
+        database.update_run(run_id, status="failed", finished_at=now(), collection_log=detail)
     except Exception as exc:
+        if login_monitor:
+            login_monitor.set_phase("Automation Failed", str(exc), tone="failed")
         database.update_run(run_id, status="failed", finished_at=now(), collection_log=str(exc))
+
+
+async def _run_collection_in_process(
+    *,
+    database: WorkflowDatabase,
+    run_id: int,
+    settings: Settings,
+    input_path: Path,
+    output_path: Path,
+    login_monitor: LoginSessionMonitor | None,
+) -> str:
+    from main import automate_indices
+    from playwright.async_api import async_playwright
+
+    csv_service = CSVService(input_path, output_path)
+    indices = csv_service.selected_indices(force=False, company=None, limit=None)
+    if not indices:
+        raise RuntimeError("No automation-ready rows were found in the checkpoint.")
+
+    def publish_status(status: str, detail: str, tone: str) -> None:
+        if login_monitor:
+            login_monitor.set_phase(status, detail, tone=tone)
+
+    progress_callback = lambda: sync_pipeline_results(database, run_id, output_path)
+    progress_callback()
+
+    async with async_playwright() as playwright:
+        connection = await prepare_existing_session(
+            playwright,
+            settings.chrome_cdp_url,
+            status_callback=publish_status,
+            # The portal is an Angular application and can finish rendering its
+            # authenticated controls well after the initial document load.
+            action_timeout_seconds=max(settings.search_timeout_seconds, 60.0),
+        )
+        publish_status(
+            "Automation Running",
+            "The existing scraping workflow is processing the prepared Customer Information page",
+            "running",
+        )
+        return_code = await automate_indices(
+            csv_service,
+            indices,
+            settings,
+            playwright=playwright,
+            connected=connection,
+            progress_callback=progress_callback,
+        )
+    progress_callback()
+    if return_code != 0:
+        raise RuntimeError(
+            f"Automation Failed: the existing scraping workflow exited with code {return_code}."
+        )
+    return "Automation completed successfully in the existing Chrome session."
 
 
 def chrome_executable() -> Path:

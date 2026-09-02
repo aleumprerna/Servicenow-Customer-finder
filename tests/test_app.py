@@ -6,6 +6,7 @@ from starlette.requests import Request
 
 import app as dashboard
 from app import _automation_table, _enrichment_table, _final_results_table, _page, _report_card
+from browser.session_monitor import LoginSnapshot
 
 
 def _row(resolution_status: str, resolution_error: str = "") -> dict[str, object]:
@@ -85,7 +86,7 @@ def test_stage_tables_show_distinct_workflow_data() -> None:
     automation = _automation_table([row])
     final = _final_results_table([row])
 
-    assert "Resolution" in enriched
+    assert "<th>Resolution</th>" not in enriched
     assert "Needs approval" in enriched
     assert "Company requires review." in enriched
     assert "Automation status" in automation
@@ -179,6 +180,9 @@ def test_page_renders_progress_steps_and_three_record_tabs(monkeypatch) -> None:
     assert "Web automation" in html
     assert "Final table" in html
     assert "Customer verification workspace" in html
+    assert 'id="login-status"' in html
+    assert "Waiting for Login" in html
+    assert "pollLoginStatus" in html
     assert 'class="overview-stats"' in html
     assert "Companies approved" in html
     assert "prefers-reduced-motion" in html
@@ -187,6 +191,32 @@ def test_page_renders_progress_steps_and_three_record_tabs(monkeypatch) -> None:
     assert '<meta http-equiv="refresh"' not in html
     enriched_button = html.split('id="tab-enriched"', 1)[0].rsplit("<button", 1)[1]
     assert "tab-button active" in enriched_button
+
+
+def test_page_shows_logged_in_session_state(monkeypatch) -> None:
+    class Database:
+        def summary(self):
+            return []
+
+    class Monitor:
+        snapshot = LoginSnapshot(
+            status="Logged In",
+            logged_in=True,
+            browser_connected=True,
+            detail="Authenticated form detected",
+            tone="logged-in",
+        )
+
+    monkeypatch.setattr(dashboard, "DATABASE", Database())
+    monkeypatch.setattr(dashboard, "LOGIN_MONITOR", Monitor())
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/", "query_string": b"", "headers": []}
+    )
+
+    html = _page(request)
+
+    assert 'id="login-status" class="session-status logged-in"' in html
+    assert ">Logged In</span>" in html
 
 
 def test_progress_payload_reports_live_stage_counts(monkeypatch) -> None:
@@ -264,3 +294,32 @@ def test_web_automation_can_start_when_some_enriched_rows_are_ready(monkeypatch)
     assert response.status_code == 303
     assert updates == [{"status": "collecting"}]
     assert len(tasks.tasks) == 1
+    assert tasks.tasks[0].args[2] is dashboard.LOGIN_MONITOR
+
+
+def test_open_browser_queues_automation_that_waits_for_login(monkeypatch) -> None:
+    updates: list[dict[str, str]] = []
+    launches: list[bool] = []
+
+    class Database:
+        def run(self, _run_id):
+            return {"id": 7, "status": "enriched"}
+
+        def report_rows(self, _run_id):
+            return [{"check_status": "apollo_success"}]
+
+        def update_run(self, _run_id, **values):
+            updates.append(values)
+
+    monkeypatch.setattr(dashboard, "DATABASE", Database())
+    monkeypatch.setattr(dashboard, "launch_chrome", lambda: launches.append(True))
+    tasks = BackgroundTasks()
+
+    response = dashboard.open_browser(7, tasks)
+
+    assert response.status_code == 303
+    assert launches == [True]
+    assert updates == [{"status": "collecting"}]
+    assert len(tasks.tasks) == 1
+    assert tasks.tasks[0].func is dashboard.run_collection
+    assert tasks.tasks[0].args == (dashboard.DATABASE, 7, dashboard.LOGIN_MONITOR)

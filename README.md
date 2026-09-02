@@ -10,7 +10,7 @@ The project also includes a local web UI that adds a full workflow around the ex
 2. The app sends each person's normalized LinkedIn profile URL to Apollo People Match and resolves companies only from Apollo's organization and employment-history response. CSV headline/company values remain report context. A primary organization is structurally verified when a named, dated current job matches it. If the primary organization name is null, the latest named employment-history organization is shown with a manual-review warning. The app does **not** scrape a logged-in LinkedIn profile.
 3. Click **Enrich records**. The app resolves confirmed employers and runs Apollo organization enrichment without opening a browser.
 4. Click **Run instance**. It opens the ServiceNow deployment-registration URL in a Chrome remote-debugging profile. Log in and wait until the Customer Information form is visible.
-5. Click **Start web automation** after logging into ServiceNow. The app uses the saved enrichment, runs browser automation without Apollo calls, and stores the results in `data/workflow.db` (SQLite).
+5. Click **Open ServiceNow**. Log in in the opened Chrome window; the app waits for the authenticated page and starts web automation automatically. The app uses the saved enrichment and stores the results in `data/workflow.db` (SQLite). **Start web automation** remains available for retrying a stopped or failed run.
 6. Every completed ServiceNow result with `servicenow_customer=No` is POSTed individually to n8n. `Yes`, `Unknown`, and technical failures are never sent.
 7. **Reports** in the UI joins the original person, company resolution, ServiceNow result, and n8n result. You can download the selected run as CSV.
 
@@ -56,7 +56,7 @@ pip install -r requirements.txt
 python -m uvicorn app:app --host 127.0.0.1 --port 8000
 ```
 
-Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Upload your CSV and click **Enrich records**. Then click **Run instance**, complete the ServiceNow login in the Chrome window that opens, and click **Start web automation**. Keep the UI server and Chrome window open until automation completes.
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Upload your CSV and click **Enrich records**. Then click **Open ServiceNow** and complete the ServiceNow login in the Chrome window that opens. Automation starts automatically after the authenticated Partner Information page is ready. Keep the UI server and Chrome window open until automation completes.
 
 The original standalone command remains available if you only want to run a company CSV directly:
 

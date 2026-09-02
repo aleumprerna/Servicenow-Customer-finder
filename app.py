@@ -12,6 +12,7 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 
 from browser.servicenow import safe_filename
+from browser.session_monitor import LoginSessionMonitor
 from config import PROJECT_ROOT, load_settings
 from workflow.database import WorkflowDatabase
 from workflow.presentation import parse_n8n_evidence
@@ -26,6 +27,7 @@ from workflow.service import (
 
 
 DATABASE = WorkflowDatabase(PROJECT_ROOT / "data" / "workflow.db")
+LOGIN_MONITOR = LoginSessionMonitor()
 app = FastAPI(title="ServiceNow Partner Workflow", docs_url=None, redoc_url=None)
 
 ENRICHED_CHECK_STATUSES = {"apollo_success", "searching", "completed", "manual_review", "error"}
@@ -40,6 +42,16 @@ class _SafeHtml(str):
 @app.on_event("startup")
 def initialize_database() -> None:
     DATABASE.initialize()
+
+
+@app.on_event("startup")
+async def start_login_monitor() -> None:
+    await LOGIN_MONITOR.start(load_settings().chrome_cdp_url)
+
+
+@app.on_event("shutdown")
+async def stop_login_monitor() -> None:
+    await LOGIN_MONITOR.stop()
 
 
 def _escape(value: Any) -> str:
@@ -371,15 +383,14 @@ def _enrichment_table(rows: list[dict[str, Any]]) -> str:
               <td>{_table_person_link(row)}<span class="cell-secondary">{_escape(row.get('headline')) or 'No headline returned'}</span></td>
               <td><strong>{company}</strong><span class="cell-secondary">{_escape(row.get('apollo_company_name')) or 'No Apollo organization name'}</span></td>
               <td>{approval}{resolution_details}</td>
-              <td>{_pretty_status(row.get('resolution_status'), 'Waiting')}</td>
               <td>{location}</td>
             </tr>"""
         )
     if not body:
-        body.append('<tr><td class="table-empty" colspan="5">Upload a CSV to see enriched records.</td></tr>')
+        body.append('<tr><td class="table-empty" colspan="4">Upload a CSV to see enriched records.</td></tr>')
     return f"""
       <div class="table-scroll"><table class="data-table">
-        <thead><tr><th>Person</th><th>Resolved company</th><th>Approval</th><th>Resolution</th><th>Company location</th></tr></thead>
+        <thead><tr><th>Person</th><th>Resolved company</th><th>Approval</th><th>Company location</th></tr></thead>
         <tbody>{''.join(body)}</tbody>
       </table></div>"""
 
@@ -583,6 +594,8 @@ def _run_progress(run_id: int) -> dict[str, Any]:
 
 
 def _page(request: Request, selected_run: int | None = None) -> str:
+    login_snapshot = LOGIN_MONITOR.snapshot
+    login_tone = login_snapshot.tone or ("logged-in" if login_snapshot.logged_in else "waiting")
     summaries = DATABASE.summary()
     if selected_run is None and summaries:
         selected_run = int(summaries[0]["id"])
@@ -758,6 +771,13 @@ def _page(request: Request, selected_run: int | None = None) -> str:
       .upload-section {{ display:flex; align-items:center; justify-content:space-between; gap:24px; padding:18px 22px; }} .upload-copy h2 {{ font-size:17px; margin-bottom:4px; }} .upload-copy p {{ margin:0; max-width:760px; font-size:13px; }} .upload-section form {{ display:flex; align-items:center; margin:0; }}
       .section-heading {{ display:flex; align-items:center; justify-content:space-between; gap:18px; margin-bottom:20px; }} .section-heading p {{ margin:4px 0 0; }} .run-picker {{ display:flex; align-items:center; gap:9px; margin:0; }} .run-picker label {{ color:#68758a; font-size:12px; font-weight:700; }}
       .run-status {{ display:inline-flex; border-radius:999px; background:#edf3fb; color:#315b8e; padding:6px 10px; font-size:12px; font-weight:750; }}
+      .session-status {{ display:inline-flex; align-items:center; gap:7px; border-radius:999px; padding:7px 11px; font-size:12px; font-weight:800; }}
+      .session-status::before {{ content:""; width:8px; height:8px; border-radius:50%; background:currentColor; }}
+      .session-status.waiting {{ background:#fff3d6; color:#91650a; }}
+      .session-status.logged-in, .session-status.ready {{ background:#e1f7eb; color:#137345; }}
+      .session-status.working {{ background:#e9f2ff; color:#245b9e; }}
+      .session-status.running {{ background:#eef3ff; color:#2d4fd1; }}
+      .session-status.failed {{ background:#fdebea; color:#a13b32; }}
       .workflow-progress {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }}
       .workflow-step {{ position:relative; display:flex; flex-direction:column; min-height:245px; padding:20px; border:1px solid #e1e7ef; border-top:4px solid #d5dce7; border-radius:13px; background:#fafbfc; }}
       .workflow-step.active {{ border-top-color:#1769e0; background:#fff; box-shadow:0 7px 20px rgba(31,74,135,.08); }} .workflow-step.complete {{ border-top-color:#20a266; background:#fbfffd; }} .workflow-step.locked {{ opacity:.7; }}
@@ -833,7 +853,7 @@ def _page(request: Request, selected_run: int | None = None) -> str:
       .eyebrow {{ display:block; margin-bottom:5px; color:#2563eb; font-size:10px; font-weight:800; letter-spacing:.14em; text-transform:uppercase; }}
       .page-header h1 {{ margin:0 0 5px; color:#0f172a; font-size:clamp(25px,2.4vw,34px); line-height:1.1; }}
       .page-header p {{ max-width:720px; color:#64748b; font-size:13px; line-height:1.5; }}
-      .header-meta {{ position:relative; z-index:1; display:flex; align-items:center; }}
+      .header-meta {{ position:relative; z-index:1; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }}
       .live-indicator {{ display:inline-flex; align-items:center; gap:8px; padding:8px 11px; border:1px solid #cce9dd; border-radius:999px; background:#effaf5; color:#12694f; font-size:11px; font-weight:750; }}
       .live-indicator i {{ width:7px; height:7px; border-radius:50%; background:#16a374; box-shadow:0 0 0 4px rgba(22,163,116,.12); }}
       .overview-stats {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin:18px 0; }}
@@ -917,7 +937,7 @@ def _page(request: Request, selected_run: int | None = None) -> str:
     </style></head><body>
       <header class="page-header">
         <div class="brand-lockup"><div class="brand-mark" aria-hidden="true">SN</div><div><span class="eyebrow">Partner intelligence</span><h1>Customer verification workspace</h1><p>Turn LinkedIn profiles into verified ServiceNow relationships with one guided, evidence-backed workflow.</p></div></div>
-        <div class="header-meta"><span class="live-indicator"><i aria-hidden="true"></i>Workflow dashboard</span></div>
+        <div class="header-meta"><span class="live-indicator"><i aria-hidden="true"></i>Workflow dashboard</span><span id="login-status" class="session-status {login_tone}" title="{_escape(login_snapshot.detail)}">{_escape(login_snapshot.status)}</span></div>
       </header>
       {_message(request)}
       {overview_stats}
@@ -955,6 +975,7 @@ def _page(request: Request, selected_run: int | None = None) -> str:
         if (requestedTab) activateTab(requestedTab, false);
 
         const workflowProgress = document.getElementById('workflow-progress');
+        const loginStatus = document.getElementById('login-status');
         let progressTimer = null;
         let workflowWasBusy = workflowProgress?.dataset.busy === 'true';
 
@@ -1054,6 +1075,33 @@ def _page(request: Request, selected_run: int | None = None) -> str:
           }});
         }});
         if (workflowProgress) pollProgress();
+
+        async function pollLoginStatus() {{
+          try {{
+            const response = await fetch('/api/session-status', {{cache:'no-store'}});
+            if (!response.ok) throw new Error('Session status request failed');
+            const data = await response.json();
+            if (loginStatus) {{
+              loginStatus.textContent = data.status;
+              loginStatus.title = data.detail || data.status;
+              ['waiting', 'logged-in', 'ready', 'working', 'running', 'failed'].forEach(name => {{
+                loginStatus.classList.remove(name);
+              }});
+              loginStatus.classList.add(data.tone || (data.logged_in ? 'logged-in' : 'waiting'));
+            }}
+          }} catch (_error) {{
+            if (loginStatus) {{
+              loginStatus.textContent = 'Waiting for Login';
+              ['logged-in', 'ready', 'working', 'running', 'failed'].forEach(name => {{
+                loginStatus.classList.remove(name);
+              }});
+              loginStatus.classList.add('waiting');
+            }}
+          }} finally {{
+            window.setTimeout(pollLoginStatus, 2000);
+          }}
+        }}
+        pollLoginStatus();
       </script>
     </body></html>"""
 
@@ -1118,12 +1166,31 @@ def set_company_override(
 
 
 @app.post("/runs/{run_id}/launch-browser")
-def open_browser(run_id: int) -> RedirectResponse:
-    if not DATABASE.run(run_id):
+def open_browser(run_id: int, background_tasks: BackgroundTasks) -> RedirectResponse:
+    run = DATABASE.run(run_id)
+    if not run:
         raise HTTPException(status_code=404, detail="Run not found")
+    if run["status"] in {"enriching", "collecting"}:
+        return RedirectResponse(
+            url=f"/?run_id={run_id}&message=This+run+is+already+busy", status_code=303
+        )
+    ready_rows = any(
+        str(row.get("check_status") or "").casefold() in ENRICHED_CHECK_STATUSES
+        for row in DATABASE.report_rows(run_id)
+    )
+    if not ready_rows:
+        return RedirectResponse(
+            url=f"/?run_id={run_id}&kind=error&message=Click+Enrich+records+first",
+            status_code=303,
+        )
     try:
         launch_chrome()
-        message, kind = "Chrome+opened.+Log+in+and+open+Customer+Information.", "success"
+        DATABASE.update_run(run_id, status="collecting")
+        background_tasks.add_task(run_collection, DATABASE, run_id, LOGIN_MONITOR)
+        message, kind = (
+            "Chrome+opened.+Log+in+and+automation+will+start+automatically.",
+            "success",
+        )
     except FileNotFoundError as exc:
         message, kind = str(exc).replace(" ", "+"), "error"
     return RedirectResponse(url=f"/?run_id={run_id}&kind={kind}&message={message}", status_code=303)
@@ -1162,7 +1229,7 @@ def collect(run_id: int, background_tasks: BackgroundTasks) -> RedirectResponse:
             status_code=303,
         )
     DATABASE.update_run(run_id, status="collecting")
-    background_tasks.add_task(run_collection, DATABASE, run_id)
+    background_tasks.add_task(run_collection, DATABASE, run_id, LOGIN_MONITOR)
     return RedirectResponse(url=f"/?run_id={run_id}&message=Web+automation+started", status_code=303)
 
 
@@ -1190,6 +1257,13 @@ def send_to_n8n(run_id: int) -> RedirectResponse:
 @app.get("/api/reports")
 def reports_api(run_id: int | None = None) -> list[dict[str, Any]]:
     return DATABASE.report_rows(run_id)
+
+
+@app.get("/api/session-status")
+def session_status() -> dict[str, Any]:
+    """Return the live login state for the Chrome session used by automation."""
+
+    return LOGIN_MONITOR.snapshot.as_dict()
 
 
 @app.get("/api/runs/{run_id}/progress")
