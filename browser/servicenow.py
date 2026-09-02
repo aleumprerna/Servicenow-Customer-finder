@@ -124,7 +124,8 @@ class ServiceNowChecker:
         radio = self.frame.locator(SELECTORS["customer_name_radio"]).first
         await expect(radio).to_be_visible(timeout=self.timeout_ms)
         if not await radio.is_checked():
-            await radio.check()
+            # ServiceNow's styled label overlays the native radio input.
+            await radio.check(force=True)
 
         await self._select_country(country_code)
         customer_input = self.frame.locator(SELECTORS["customer_name"]).first

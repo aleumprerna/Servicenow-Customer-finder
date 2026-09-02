@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from playwright.async_api import Browser, Frame, Page, Playwright
+from playwright.async_api import Browser, Frame, Locator, Page, Playwright
 
 
 CUSTOMER_NAME_RADIO = 'input[name="customer-search-criteria"][value="customer_name"]'
 CUSTOMER_INFORMATION_SECTION = "#customer-information"
 IMPLEMENTATION_RADIO = 'input[name="u_deployment_category"][value="implementation2"]'
-IMPLEMENTATION_FALLBACK = "#0-implementation2"
+# CSS IDs beginning with a digit must be escaped. An attribute selector stays
+# readable and works in both Playwright and the browser's querySelectorAll.
+IMPLEMENTATION_FALLBACK = '[id="0-implementation2"]'
 ENGAGEMENT_MANAGER_HINT = "Select Engagement Manager"
 
 
@@ -26,24 +28,42 @@ class ConnectedServiceNow:
 
 async def _frame_has_customer_form(frame: Frame) -> bool:
     try:
-        radio_count = await frame.locator(CUSTOMER_NAME_RADIO).count()
-        heading_count = await frame.get_by_text("Customer Information", exact=True).count()
-        section_count = await frame.locator(CUSTOMER_INFORMATION_SECTION).count()
-        return radio_count > 0 and (heading_count > 0 or section_count > 0)
+        radio = frame.locator(CUSTOMER_NAME_RADIO)
+        heading = frame.get_by_text("Customer Information", exact=True)
+        section = frame.locator(CUSTOMER_INFORMATION_SECTION)
+        # The Angular form renders later wizard steps into the DOM while they are
+        # still hidden. Counting those controls therefore reports Customer
+        # Information too early and makes navigation continue against a hidden
+        # section. Treat a step as active only when its identifying DOM is visible.
+        return await radio.count() > 0 and (
+            await _any_visible(heading) or await _any_visible(section)
+        )
     except Exception:
         return False
 
 
 async def _frame_has_partner_form(frame: Frame) -> bool:
     try:
-        implementation_count = await frame.locator(
+        implementation = frame.locator(
             f"{IMPLEMENTATION_RADIO}, {IMPLEMENTATION_FALLBACK}"
-        ).count()
-        manager_count = await frame.get_by_text(ENGAGEMENT_MANAGER_HINT, exact=False).count()
-        heading_count = await frame.get_by_text("Partner Information", exact=True).count()
-        return implementation_count > 0 and (manager_count > 0 or heading_count > 0)
+        )
+        manager = frame.get_by_text(ENGAGEMENT_MANAGER_HINT, exact=False)
+        heading = frame.get_by_text("Partner Information", exact=True)
+        return await implementation.count() > 0 and (
+            await _any_visible(manager) or await _any_visible(heading)
+        )
     except Exception:
         return False
+
+
+async def _any_visible(locator: Locator) -> bool:
+    """Return whether any item in a Playwright locator is currently visible."""
+
+    count = await locator.count()
+    for index in range(count):
+        if await locator.nth(index).is_visible():
+            return True
+    return False
 
 
 async def find_servicenow_form(browser: Browser) -> tuple[Page, Frame] | None:

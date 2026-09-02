@@ -147,34 +147,43 @@ async def _select_engagement_manager(
             tone="working",
         ),
     )
+    field_group = frame.locator(".form-group").filter(
+        has=frame.get_by_text("Engagement Manager Name", exact=True)
+    ).first
     control = await _visible_locator(
         (
+            field_group.locator(".select2-container, .select2-selection"),
             frame.locator(
                 '.select2-container:has-text("Select Engagement Manager"), '
-                '.select2-selection:has-text("Select Engagement Manager"), '
-                '.select2-container:has-text("ritik.d"), '
-                '.select2-selection:has-text("ritik.d")'
+                '.select2-selection:has-text("Select Engagement Manager")'
             ),
-            frame.get_by_text(ENGAGEMENT_MANAGER_HINT, exact=False),
         ),
         timeout_ms,
     )
-    await control.scroll_into_view_if_needed()
-    await control.click()
-
     search_input = frame.locator(SELECT2_SEARCH_INPUT).last
+    if not await search_input.is_visible():
+        await control.scroll_into_view_if_needed()
+        await control.click()
     await expect(search_input).to_be_visible(timeout=timeout_ms)
     await search_input.fill("ritik.d")
 
-    options = frame.locator(SELECT2_RESULTS)
-    option = options.filter(has_text=re.compile(r"\britik\.d\b", re.I)).first
-    await expect(option).to_be_visible(timeout=timeout_ms)
+    option = await _visible_locator(
+        (
+            frame.get_by_role("option", name=re.compile(r"\britik\.d\b", re.I)),
+            frame.locator(SELECT2_RESULTS).filter(
+                has_text=re.compile(r"\britik\.d\b", re.I)
+            ),
+        ),
+        timeout_ms,
+    )
     await option.click()
 
-    selected_text = frame.locator(
-        '.select2-container:has-text("ritik.d"), .select2-selection:has-text("ritik.d")'
-    ).first
-    await expect(selected_text).to_be_visible(timeout=timeout_ms)
+    # Verify the real Angular-bound field, not matching text elsewhere in the
+    # page or in a stale Select2 result. ServiceNow uses a trailing space in this
+    # field's name and stores the selected user's sys_id as its value.
+    bound_input = field_group.locator('input[name="engManagerField "]').first
+    await expect(bound_input).not_to_have_value("", timeout=timeout_ms)
+    await expect(control).not_to_have_class(re.compile(r"\bselect2-default\b"), timeout=timeout_ms)
 
 
 async def _select_implementation(
@@ -256,12 +265,15 @@ async def _ready_customer_name_search(
 
     radio = frame.locator(CUSTOMER_NAME_RADIO).first
     await expect(radio).to_be_attached(timeout=timeout_ms)
-    await radio.check()
+    # ServiceNow's styled label overlays the native radio input.
+    await radio.check(force=True)
     await expect(radio).to_be_checked(timeout=timeout_ms)
 
     customer_input = frame.locator(CUSTOMER_NAME_INPUT).first
     country_select = frame.locator(CUSTOMER_COUNTRY_SELECT).first
-    await expect(customer_input).to_be_enabled(timeout=timeout_ms)
+    # The name input intentionally remains disabled until the per-company
+    # country is selected by ServiceNowChecker._select_country().
+    await expect(customer_input).to_be_attached(timeout=timeout_ms)
     await expect(country_select).to_be_attached(timeout=timeout_ms)
     return connection
 
