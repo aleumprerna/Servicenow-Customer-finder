@@ -323,3 +323,72 @@ def test_open_browser_queues_automation_that_waits_for_login(monkeypatch) -> Non
     assert len(tasks.tasks) == 1
     assert tasks.tasks[0].func is dashboard.run_collection
     assert tasks.tasks[0].args == (dashboard.DATABASE, 7, dashboard.LOGIN_MONITOR)
+
+
+def test_enrichment_table_renders_ai_button_for_unverified_records() -> None:
+    html = _enrichment_table([_row("apollo_reported_current", "Incomplete current-employment evidence")])
+    assert 'class="ai-resolve-btn"' in html
+    assert '✨ AI' in html
+    assert 'class="company-input-group"' in html
+
+
+def test_ai_resolve_company_endpoint_success(monkeypatch) -> None:
+    resolved_person = {
+        "id": 10,
+        "run_id": 3,
+        "person_name": "Regitze Reeh",
+        "linkedin_url": "https://linkedin.com/in/regitze-reeh",
+        "headline": "Head of Corporate Affairs at Harbour Energy",
+    }
+    updated_resolutions = []
+    reset_checks = []
+    updated_runs = []
+
+    class Database:
+        def person(self, person_id):
+            return resolved_person if person_id == 10 else None
+
+        def update_person_resolution(self, person_id, **kwargs):
+            updated_resolutions.append((person_id, kwargs))
+
+        def reset_check_for_company_change(self, person_id, run_id, company):
+            reset_checks.append((person_id, run_id, company))
+
+        def update_run(self, run_id, **kwargs):
+            updated_runs.append((run_id, kwargs))
+
+    monkeypatch.setattr(dashboard, "DATABASE", Database())
+    monkeypatch.setattr(
+        dashboard,
+        "resolve_company_from_web",
+        lambda **_kwargs: {
+            "success": True,
+            "company_name": "Harbour Energy",
+            "confidence": "high",
+            "reason": "Found on LinkedIn",
+        },
+    )
+
+    response = dashboard.ai_resolve_company(10, run_id=3, auto_approve=True)
+    assert response.status_code == 200
+    payload = json.loads(response.body)
+    assert payload["success"] is True
+    assert payload["company_name"] == "Harbour Energy"
+    assert payload["approved"] is True
+    assert updated_resolutions == [
+        (10, {"company_name": "Harbour Energy", "status": "manual_verified", "error": ""})
+    ]
+    assert reset_checks == [(10, 3, "Harbour Energy")]
+    assert updated_runs == [(3, {"status": "needs_enrichment"})]
+
+
+def test_ai_resolve_company_endpoint_person_not_found(monkeypatch) -> None:
+    class Database:
+        def person(self, _person_id):
+            return None
+
+    monkeypatch.setattr(dashboard, "DATABASE", Database())
+    response = dashboard.ai_resolve_company(999, run_id=1, auto_approve=True)
+    assert response.status_code == 404
+    payload = json.loads(response.body)
+    assert payload["success"] is False

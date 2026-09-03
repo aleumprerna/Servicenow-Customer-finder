@@ -123,6 +123,11 @@ class WorkflowDatabase:
         with self.connect() as conn:
             conn.execute(f"UPDATE runs SET {assignments} WHERE id = ?", (*values.values(), run_id))
 
+    def person(self, person_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM people WHERE id = ?", (person_id,)).fetchone()
+            return dict(row) if row else None
+
     def people_for_run(self, run_id: int) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute("SELECT * FROM people WHERE run_id = ? ORDER BY id", (run_id,)).fetchall()

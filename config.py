@@ -37,6 +37,7 @@ class Settings(BaseModel):
     result_selectors: tuple[str, ...] = ()
     n8n_webhook_url: str | None = None
     app_base_url: str = "http://localhost:8000"
+    openai_api_key: str | None = None
 
     @field_validator("input_csv", "output_csv", "debug_dir", mode="before")
     @classmethod
@@ -114,5 +115,6 @@ def load_settings(env_file: Path | None = None) -> Settings:
         "result_selectors": _parse_result_selectors(),
         "n8n_webhook_url": dynamic_value("N8N_WEBHOOK_URL") or None,
         "app_base_url": dynamic_value("APP_BASE_URL", "http://localhost:8000"),
+        "openai_api_key": dynamic_value("OPENAI_API_KEY") or _optional("OPENAI_API_KEY"),
     }
     return Settings.model_validate(data)
