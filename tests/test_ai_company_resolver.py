@@ -40,12 +40,50 @@ def test_resolve_company_from_web_openai_success() -> None:
             linkedin_url="https://linkedin.com/in/regitze-reeh",
             headline="Head of Corporate Affairs at Harbour Energy",
             api_key="sk-fake-key",
+            provider="openai",
+            base_url="https://api.openai.com/v1",
+            model="gpt-4o",
         )
 
     assert result["success"] is True
     assert result["company_name"] == "Harbour Energy"
     assert result["confidence"] == "high"
     assert result["source"] == "openai_web_search"
+
+
+def test_resolve_company_with_glm_chat_completions() -> None:
+    mock_response = MagicMock()
+    mock_response.choices = [
+        MagicMock(
+            message=MagicMock(
+                content=(
+                    '{"company_name":"Harbour Energy","confidence":"high",'
+                    '"reason":"The supplied headline names the employer."}'
+                )
+            )
+        )
+    ]
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = mock_response
+
+    with patch("openai.OpenAI", return_value=mock_client) as client_class:
+        result = resolve_company_from_web(
+            person_name="Regitze Reeh",
+            linkedin_url="https://linkedin.com/in/regitze-reeh",
+            headline="Head of Corporate Affairs at Harbour Energy",
+            api_key="glm-fake-key",
+            provider="glm",
+            base_url="https://api.tokenrouter.com/v1",
+            model="z-ai/glm-5.3",
+        )
+
+    client_class.assert_called_once_with(
+        api_key="glm-fake-key", base_url="https://api.tokenrouter.com/v1"
+    )
+    call = mock_client.chat.completions.create.call_args.kwargs
+    assert call["model"] == "z-ai/glm-5.3"
+    assert result["success"] is True
+    assert result["source"] == "glm_profile_context"
 
 
 def test_resolve_company_from_web_fallback_on_openai_error() -> None:

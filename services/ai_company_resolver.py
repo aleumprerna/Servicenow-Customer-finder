@@ -41,27 +41,40 @@ def resolve_company_from_web(
     linkedin_url: str,
     headline: str = "",
     api_key: str | None = None,
+    *,
+    base_url: str | None = None,
+    model: str | None = None,
+    provider: str | None = None,
 ) -> dict[str, Any]:
     """Search the web to resolve a person's current company from their LinkedIn profile.
 
-    Uses OpenAI web search preview with a fallback to headline parsing.
+    Uses the configured LLM provider with a fallback to headline parsing. OpenAI
+    can use hosted web search; GLM receives the supplied profile context only.
     """
-    key = api_key or load_settings().openai_api_key
+    settings = load_settings()
+    provider_name = (provider or settings.llm_provider).casefold()
+    key = api_key or settings.llm_api_key
+    selected_model = model or settings.llm_model
+    selected_base_url = base_url or settings.llm_base_url
 
-    # 1. Attempt OpenAI web search preview if API key is present
+    # 1. Attempt resolution with the configured model if its API key is present.
     if key:
         try:
             import openai
 
-            client = openai.OpenAI(api_key=key)
+            client = openai.OpenAI(api_key=key, base_url=selected_base_url)
             prompt = (
                 "You are an expert corporate researcher.\n"
                 "Your task is to identify the current company/employer of this person.\n"
                 f"Person Name: {person_name}\n"
                 f"LinkedIn Profile URL: {linkedin_url}\n"
                 f"Headline / Current Role Context: {headline}\n\n"
-                "Search the web (including LinkedIn profile data, recent posts, company announcements, "
-                "news, and executive directories) to determine their current employer / company name.\n"
+                + (
+                    "Search the web, including recent reliable sources, to determine the current employer.\n"
+                    if provider_name == "openai"
+                    else "Use only the supplied profile URL and headline context. Do not claim to have browsed the web.\n"
+                )
+                +
                 "Return ONLY a valid JSON object in the exact format:\n"
                 "{\n"
                 '  "company_name": "Company Name",\n'
@@ -71,12 +84,20 @@ def resolve_company_from_web(
                 "Do not include markdown code fences or any explanatory text outside the JSON."
             )
 
-            response = client.responses.create(
-                model="gpt-4o",
-                tools=[{"type": "web_search_preview"}],
-                input=prompt,
-            )
-            raw_text = getattr(response, "output_text", str(response)).strip()
+            if provider_name == "openai":
+                response = client.responses.create(
+                    model=selected_model,
+                    tools=[{"type": "web_search_preview"}],
+                    input=prompt,
+                )
+                raw_text = getattr(response, "output_text", str(response)).strip()
+            else:
+                response = client.chat.completions.create(
+                    model=selected_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0,
+                )
+                raw_text = str(response.choices[0].message.content or "").strip()
 
             # Parse JSON from response
             json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
@@ -89,10 +110,12 @@ def resolve_company_from_web(
                         "company_name": company_name,
                         "confidence": str(data.get("confidence") or "medium"),
                         "reason": str(data.get("reason") or "Resolved via web search"),
-                        "source": "openai_web_search",
+                        "source": (
+                            "openai_web_search" if provider_name == "openai" else "glm_profile_context"
+                        ),
                     }
         except Exception as exc:
-            logger.warning("OpenAI web search company resolution failed: %s", exc)
+            logger.warning("%s company resolution failed: %s", provider_name.upper(), exc)
 
     # 2. Fallback: Extract from headline
     headline_company = extract_company_from_headline(headline)

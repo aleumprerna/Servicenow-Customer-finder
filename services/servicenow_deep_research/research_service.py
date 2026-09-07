@@ -151,14 +151,36 @@ def _json_object(text: str) -> dict[str, Any]:
     return parsed
 
 
-class OpenAIResearchProvider:
-    """Discovery and synthesis adapter; deterministic rules make the final status decision."""
+class LLMResearchProvider:
+    """OpenAI-compatible adapter; deterministic rules make the final status decision."""
 
-    def __init__(self, api_key: str, *, model: str = "gpt-4o", timeout_seconds: float = 180.0) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        model: str = "gpt-4o",
+        base_url: str | None = None,
+        provider_name: str = "openai",
+        supports_hosted_web_search: bool = True,
+        timeout_seconds: float = 180.0,
+    ) -> None:
         if not str(api_key or "").strip():
-            raise ResearchConfigurationError("OPENAI_API_KEY is required for Deep Research.")
+            raise ResearchConfigurationError(
+                f"An API key is required for the {provider_name.upper()} research provider."
+            )
         self.model = model
-        self.client = OpenAI(api_key=api_key, timeout=timeout_seconds, max_retries=1)
+        self.provider_name = provider_name.casefold()
+        self.supports_hosted_web_search = supports_hosted_web_search
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout_seconds,
+            max_retries=1,
+        )
+
+    @property
+    def provider_label(self) -> str:
+        return f"{self.provider_name}:{self.model}"
 
     @staticmethod
     def _findings(
@@ -195,6 +217,11 @@ class OpenAIResearchProvider:
         existing_context: dict[str, Any],
         official_only: bool,
     ) -> ProviderDiscovery:
+        # TokenRouter's GLM 5.3 endpoint is text-only and does not expose the
+        # OpenAI hosted web_search tool. The bounded crawler remains the source
+        # of truth in that mode, and GLM synthesizes those collected findings.
+        if not getattr(self, "supports_hosted_web_search", True):
+            return ProviderDiscovery(findings=[], source_urls=set())
         scope = "Only use sources hosted on the official domain or its subdomains." if official_only else (
             "Use reliable third-party sources. Exclude social forums, aggregators, and unsourced directories."
         )
@@ -249,19 +276,28 @@ Return JSON only: {{"status":"CONFIRMED_CUSTOMER|LIKELY_CUSTOMER|INCONCLUSIVE|NO
 Evidence: {json.dumps(evidence, ensure_ascii=False)[:28000]}
 """.strip()
         try:
-            response = self.client.responses.create(
-                model=self.model,
-                text=CLASSIFICATION_FORMAT,
-                input=prompt,
-            )
-            return ClassificationSuggestion.model_validate(_json_object(response.output_text))
+            if self.supports_hosted_web_search:
+                response = self.client.responses.create(
+                    model=self.model,
+                    text=CLASSIFICATION_FORMAT,
+                    input=prompt,
+                )
+                output_text = response.output_text
+            else:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0,
+                )
+                output_text = response.choices[0].message.content or ""
+            return ClassificationSuggestion.model_validate(_json_object(output_text))
         except Exception as exc:
             LOGGER.info("Deep research model synthesis was unavailable: %s", exc)
             return None
 
 
 class DeepResearchService:
-    def __init__(self, *, provider: OpenAIResearchProvider, crawler: BoundedOfficialCrawler) -> None:
+    def __init__(self, *, provider: LLMResearchProvider, crawler: BoundedOfficialCrawler) -> None:
         self.provider = provider
         self.crawler = crawler
 
@@ -345,7 +381,10 @@ class DeepResearchService:
             findings=findings,
             sources_checked=sources_checked,
             research_depth=research_depth,
-            model_provider=f"openai:{self.provider.model}+deterministic-rules",
+            model_provider=(
+                f"{getattr(self.provider, 'provider_label', f'openai:{self.provider.model}')}"
+                "+deterministic-rules"
+            ),
             suggestion=suggestion,
         )
         LOGGER.info(
@@ -356,3 +395,8 @@ class DeepResearchService:
             result.relevant_sources,
         )
         return result
+
+
+# Backwards-compatible import for callers and stored integrations that used the
+# original provider name before GLM support was added.
+OpenAIResearchProvider = LLMResearchProvider

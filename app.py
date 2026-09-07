@@ -34,7 +34,7 @@ from config import PROJECT_ROOT, load_settings
 
 from services.ai_company_resolver import resolve_company_from_web
 
-from services.servicenow_deep_research import DeepResearchService, OpenAIResearchProvider
+from services.servicenow_deep_research import DeepResearchService, LLMResearchProvider
 
 from services.servicenow_deep_research.crawler import BoundedOfficialCrawler
 
@@ -4048,9 +4048,12 @@ def _run_deep_research_task(database: WorkflowDatabase, person_id: int, settings
         "company_linkedin_url": row.get("company_linkedin_url"),
     }
     try:
-        provider = OpenAIResearchProvider(
-            str(settings.openai_api_key or ""),
-            model=settings.deep_research_model,
+        provider = LLMResearchProvider(
+            str(settings.llm_api_key or ""),
+            model=settings.llm_model,
+            base_url=settings.llm_base_url,
+            provider_name=settings.llm_provider,
+            supports_hosted_web_search=settings.llm_supports_hosted_web_search,
             timeout_seconds=settings.deep_research_request_timeout_seconds,
         )
         crawler = BoundedOfficialCrawler(
@@ -4122,10 +4125,17 @@ def start_deep_research(
         )
 
     settings = load_settings()
-    if not settings.openai_api_key:
+    if not settings.llm_api_key:
         return JSONResponse(
             status_code=503,
-            content={"success": False, "error": "Add OPENAI_API_KEY to enable Deep Research."},
+            content={
+                "success": False,
+                "error": (
+                    "Add GLM_KEY to enable Deep Research."
+                    if settings.llm_provider == "glm"
+                    else "Add OPENAI_API_KEY to enable Deep Research."
+                ),
+            },
         )
     if not force and DATABASE.deep_research_is_fresh(person_id, settings.deep_research_cache_days):
         return JSONResponse(
@@ -4138,7 +4148,7 @@ def start_deep_research(
         company_name=company_name,
         official_domain=official_domain,
         research_depth=research_depth,
-        model_provider=f"openai:{settings.deep_research_model}+deterministic-rules",
+        model_provider=f"{settings.llm_provider}:{settings.llm_model}+deterministic-rules",
     )
     if not claimed:
         return JSONResponse(

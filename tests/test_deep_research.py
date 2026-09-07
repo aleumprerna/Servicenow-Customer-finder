@@ -150,6 +150,7 @@ def test_openai_discovery_is_official_domain_scoped_and_source_grounded() -> Non
 
     provider = object.__new__(OpenAIResearchProvider)
     provider.model = "test-model"
+    provider.supports_hosted_web_search = True
     provider.client = SimpleNamespace(responses=Responses())
 
     discovery = provider.discover(
@@ -239,7 +240,12 @@ def test_start_endpoint_returns_cached_result_without_adding_task(monkeypatch) -
     monkeypatch.setattr(
         dashboard,
         "load_settings",
-        lambda: SimpleNamespace(openai_api_key="test-key", deep_research_cache_days=30),
+        lambda: SimpleNamespace(
+            llm_api_key="test-key",
+            llm_provider="glm",
+            llm_model="z-ai/glm-5.3",
+            deep_research_cache_days=30,
+        ),
     )
     tasks = BackgroundTasks()
 
@@ -252,7 +258,7 @@ def test_start_endpoint_returns_cached_result_without_adding_task(monkeypatch) -
     assert not tasks.tasks
 
 
-def test_start_endpoint_reports_missing_openai_configuration(monkeypatch) -> None:
+def test_start_endpoint_reports_missing_glm_configuration(monkeypatch) -> None:
     class Database:
         def person(self, _person_id):
             return {"id": 10, "run_id": 3, "company_name": "Example", "company_domain": "example.com"}
@@ -264,7 +270,7 @@ def test_start_endpoint_reports_missing_openai_configuration(monkeypatch) -> Non
     monkeypatch.setattr(
         dashboard,
         "load_settings",
-        lambda: SimpleNamespace(openai_api_key=None),
+        lambda: SimpleNamespace(llm_api_key=None, llm_provider="glm"),
     )
 
     response = dashboard.start_deep_research(
@@ -274,7 +280,7 @@ def test_start_endpoint_reports_missing_openai_configuration(monkeypatch) -> Non
 
     assert response.status_code == 503
     assert payload["success"] is False
-    assert "OPENAI_API_KEY" in payload["error"]
+    assert "GLM_KEY" in payload["error"]
 
 
 def test_result_ui_shows_deep_research_action_and_evidence() -> None:

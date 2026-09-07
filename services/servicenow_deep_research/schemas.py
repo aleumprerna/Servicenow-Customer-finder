@@ -76,7 +76,7 @@ class DeepResearchResult(BaseModel):
     sources_checked: int = Field(default=0, ge=0)
     relevant_sources: int = Field(default=0, ge=0)
     research_depth: str = "deep"
-    model_provider: str = "openai+rules"
+    model_provider: str = "llm+rules"
     researched_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
     )

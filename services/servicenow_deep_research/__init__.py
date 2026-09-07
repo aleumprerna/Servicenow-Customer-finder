@@ -3,6 +3,7 @@
 from .research_service import (
     DeepResearchError,
     DeepResearchService,
+    LLMResearchProvider,
     OpenAIResearchProvider,
     ResearchConfigurationError,
 )
@@ -13,6 +14,7 @@ __all__ = [
     "DeepResearchResult",
     "DeepResearchService",
     "EvidenceFinding",
+    "LLMResearchProvider",
     "OpenAIResearchProvider",
     "ResearchClassification",
     "ResearchConfigurationError",
