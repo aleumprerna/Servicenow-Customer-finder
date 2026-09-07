@@ -10,6 +10,8 @@ import io
 
 import json
 
+import logging
+
 import os
 
 from pathlib import Path
@@ -31,6 +33,10 @@ from browser.session_monitor import LoginSessionMonitor
 from config import PROJECT_ROOT, load_settings
 
 from services.ai_company_resolver import resolve_company_from_web
+
+from services.servicenow_deep_research import DeepResearchService, OpenAIResearchProvider
+
+from services.servicenow_deep_research.crawler import BoundedOfficialCrawler
 
 from workflow.database import WorkflowDatabase
 
@@ -57,6 +63,8 @@ from workflow.service import (
 
 
 DATABASE = WorkflowDatabase(PROJECT_ROOT / "data" / "workflow.db")
+
+LOGGER = logging.getLogger(__name__)
 
 LOGIN_MONITOR = LoginSessionMonitor()
 
@@ -2947,6 +2955,22 @@ def _legacy_page(request: Request, selected_run: int | None = None) -> str:
 
 
 
+def _friendly_company_review_error(value: Any) -> str:
+    detail = " ".join(str(value or "").split())
+    lowered = detail.casefold()
+    if "proxyerror" in lowered or "unable to connect to proxy" in lowered:
+        return "The company data service could not be reached. Check the network or proxy settings, then try again."
+    if "timed out" in lowered or "timeout" in lowered:
+        return "The company lookup timed out. Try again, or confirm the company manually."
+    if "rejected the api key" in lowered or "http 401" in lowered:
+        return "The company data service rejected its API key. Check the Apollo configuration, then try again."
+    if "lacks access" in lowered or "http 403" in lowered:
+        return "The Apollo API key does not have access to this lookup."
+    if detail:
+        return detail
+    return "We could not confidently match this contact to a company."
+
+
 def _review_companies_table(rows: list[dict[str, Any]]) -> str:
     """Render the client-facing company review table.
 
@@ -2968,11 +2992,14 @@ def _review_companies_table(rows: list[dict[str, Any]]) -> str:
         status = _status_pill("Confirmed", "success") if trusted else _status_pill("Needs review", "warning")
         review = '<span class="no-action" aria-label="No action needed">—</span>'
         if not trusted:
-            reason = _escape(row.get("resolution_error")) or "We could not confidently match this contact to a company."
+            raw_reason = str(row.get("resolution_error") or "")
+            reason = _escape(_friendly_company_review_error(raw_reason))
+            technical_reason = _escape(raw_reason) or reason
             review = f"""
               <details class="row-review">
                 <summary class="button row-action">Review</summary>
                 <div class="review-panel">
+                  <button type="button" class="review-close" aria-label="Close company review">×</button>
                   <strong>Confirm company</strong>
                   <p>{reason}</p>
                   <form class="company-override" method="post" action="/people/{int(row['person_id'])}/company">
@@ -2986,7 +3013,7 @@ def _review_companies_table(rows: list[dict[str, Any]]) -> str:
                     </div>
                     <div class="ai-status-msg" aria-live="polite"></div>
                   </form>
-                  <details class="technical-note"><summary>Matching details</summary><p>{reason}</p></details>
+                  <details class="technical-note"><summary>Matching details</summary><p>{technical_reason}</p></details>
                 </div>
               </details>"""
         body.append(
@@ -3042,6 +3069,111 @@ def _result_evidence(row: dict[str, Any], evidence: Any) -> str:
     return "".join(blocks)
 
 
+def _deep_research_evidence_list(items: Any, empty_copy: str) -> str:
+    if isinstance(items, str):
+        try:
+            items = json.loads(items)
+        except json.JSONDecodeError:
+            items = []
+    if not isinstance(items, list) or not items:
+        return f'<p class="deep-empty">{_escape(empty_copy)}</p>'
+    cards: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "")
+        safe_url = url if url.startswith(("https://", "http://")) else ""
+        title = _escape(item.get("page_title") or url or "Source")
+        source_tag = "Official" if item.get("official_source") else "External"
+        strength = str(item.get("strength") or "weak").capitalize()
+        link = (
+            f'<a href="{_escape(safe_url)}" target="_blank" rel="noopener noreferrer">{title}</a>'
+            if safe_url
+            else f"<strong>{title}</strong>"
+        )
+        cards.append(
+            '<li class="deep-source">'
+            f'<div>{link}<span class="source-tags"><span>{source_tag}</span><span>{_escape(strength)}</span></span></div>'
+            f'<p>{_escape(item.get("evidence") or "No excerpt available.")}</p>'
+            '</li>'
+        )
+    return f'<ul class="deep-source-list">{"".join(cards)}</ul>' if cards else f'<p class="deep-empty">{_escape(empty_copy)}</p>'
+
+
+def _deep_research_cell(row: dict[str, Any]) -> str:
+    person_id = int(row.get("person_id") or 0)
+    request_status = str(row.get("dr_request_status") or "idle")
+    classification = str(row.get("dr_classification_status") or "")
+    confidence = int(row.get("dr_confidence") or 0)
+    domain = str(row.get("company_domain") or "").strip()
+    labels = {
+        "CONFIRMED_CUSTOMER": ("Confirmed customer", "success"),
+        "LIKELY_CUSTOMER": ("Likely customer", "success"),
+        "INCONCLUSIVE": ("Inconclusive", "warning"),
+        "NO_OFFICIAL_EVIDENCE": ("No official evidence", "neutral"),
+        "PARTNER_ONLY": ("Partner evidence only", "info"),
+    }
+    label, tone = labels.get(classification, ("Not researched", "neutral"))
+    is_running = request_status == "running"
+    has_result = bool(classification and row.get("dr_researched_at"))
+    button_label = "Researching..." if is_running else "Run again" if has_result else "Deep Research"
+    disabled = " disabled" if is_running or not domain else ""
+    title = "" if domain else ' title="Add an official company website before researching"'
+    force = "true" if has_result else "false"
+    button = (
+        f'<button type="button" class="deep-research-btn" data-person-id="{person_id}" '
+        f'data-force="{force}"{disabled}{title}>{button_label}</button>'
+    )
+    progress = (
+        '<span class="deep-progress" aria-live="polite"><span class="mini-spinner"></span>'
+        '<span data-research-message>Searching official sources...</span></span>'
+        if is_running
+        else '<span class="deep-progress" aria-live="polite" hidden><span class="mini-spinner"></span><span data-research-message></span></span>'
+    )
+    error = str(row.get("dr_last_error") or "")
+    error_html = f'<small class="deep-error">{_escape(error)}</small>' if request_status == "failed" and error else ""
+    if not has_result:
+        return f'<div class="deep-research-cell">{button}{progress}{error_html}</div>'
+
+    researched_at = str(row.get("dr_researched_at") or "").replace("T", " ").replace("+00:00", " UTC")
+    customer_sources = _deep_research_evidence_list(
+        row.get("dr_customer_evidence"), "No end-customer evidence was retained."
+    )
+    partner_sources = _deep_research_evidence_list(
+        row.get("dr_partner_evidence"), "No partner-only evidence was found."
+    )
+    ambiguous_sources = _deep_research_evidence_list(
+        row.get("dr_ambiguous_evidence"), "No ambiguous references were retained."
+    )
+    details = f"""
+      <details class="row-evidence deep-details">
+        <summary class="deep-view">View research</summary>
+        <div class="evidence-panel deep-panel">
+          <button type="button" class="deep-close" aria-label="Close research evidence">×</button>
+          <h3>{_escape(row.get('company_name') or 'Company')} research</h3>
+          <div class="deep-panel-summary">{_status_pill(label, tone)} <strong>{confidence}% confidence</strong></div>
+          <p>{_escape(row.get('dr_summary') or '')}</p>
+          <dl class="evidence-facts">
+            <div><dt>Sources checked</dt><dd>{int(row.get('dr_sources_checked') or 0)}</dd></div>
+            <div><dt>Relevant sources</dt><dd>{int(row.get('dr_relevant_sources') or 0)}</dd></div>
+            <div><dt>Official domain</dt><dd>{_escape(row.get('company_domain') or 'Not available')}</dd></div>
+            <div><dt>Last researched</dt><dd>{_escape(researched_at)}</dd></div>
+          </dl>
+          <section><h4>Customer evidence</h4>{customer_sources}</section>
+          <section><h4>Partner evidence</h4>{partner_sources}</section>
+          <section><h4>Ambiguous references</h4>{ambiguous_sources}</section>
+        </div>
+      </details>"""
+    return (
+        '<div class="deep-research-cell">'
+        f'{_status_pill(label, tone)}'
+        f'<small>{confidence}% confidence · {int(row.get("dr_relevant_sources") or 0)} sources</small>'
+        f'<small>Last researched: {_escape(researched_at.split(" ", 1)[0])}</small>'
+        f'{details}{button}{progress}{error_html}'
+        '</div>'
+    )
+
+
 def _simplified_results_table(rows: list[dict[str, Any]]) -> str:
     body: list[str] = []
     for row in rows:
@@ -3072,15 +3204,16 @@ def _simplified_results_table(rows: list[dict[str, Any]]) -> str:
               <td>{_status_pill(customer_label, customer_tone)}</td>
               <td>{_status_pill(partner_label, 'info') if partner_label != '—' else '<span class="no-action">—</span>'}</td>
               <td>{_status_pill(opportunity_label, 'success') if opportunity_label != '—' else '<span class="no-action">—</span>'}</td>
+              <td>{_deep_research_cell(row)}</td>
               <td><details class="row-evidence"><summary class="button row-action">View evidence</summary><div class="evidence-panel"><h3>{company}</h3>{evidence_html}</div></details></td>
             </tr>"""
         )
     if not body:
-        body.append('<tr><td class="table-empty" colspan="6">Results will appear here when verification is complete.</td></tr>')
+        body.append('<tr><td class="table-empty" colspan="7">Results will appear here when verification is complete.</td></tr>')
     return f"""
       <div class="table-wrap">
         <table class="review-table results-table">
-          <thead><tr><th>Contact</th><th>Company</th><th>Customer status</th><th>Partner</th><th>Opportunity</th><th><span class="sr-only">Action</span></th></tr></thead>
+          <thead><tr><th>Contact</th><th>Company</th><th>Customer status</th><th>Partner</th><th>Opportunity</th><th>Deep Research</th><th><span class="sr-only">Action</span></th></tr></thead>
           <tbody>{''.join(body)}</tbody>
         </table>
       </div>"""
@@ -3160,6 +3293,8 @@ _REDESIGN_STYLES = r"""
   .search-wrap svg { position:absolute; left:13px; top:50%; width:18px; height:18px; color:var(--subtle); transform:translateY(-50%); pointer-events:none; }
   .search-input { width:100%; min-height:44px; padding:0 14px 0 42px; border:1px solid var(--border-strong); border-radius:8px; background:#fff; color:var(--ink); }
   .filter-button.active { border-color:#fed7aa; background:var(--amber-soft); color:var(--amber); }
+  .workflow-notice { margin:16px 26px 0; padding:11px 13px; border:1px solid #fed7aa; border-radius:8px; background:var(--amber-soft); color:#92400e; font-size:.875rem; }
+  .workflow-notice.error { border-color:#fecaca; background:#fef2f2; color:var(--red); }
   .table-wrap { overflow:auto; }
   .review-table { width:100%; border-collapse:collapse; }
   .review-table th { padding:11px 18px; border-bottom:1px solid var(--border-strong); background:var(--surface-soft); color:var(--muted); font-size:.75rem; font-weight:700; letter-spacing:.025em; text-align:left; white-space:nowrap; }
@@ -3182,6 +3317,8 @@ _REDESIGN_STYLES = r"""
   .row-review summary::-webkit-details-marker,.row-evidence summary::-webkit-details-marker { display:none; }
   .row-action { min-height:36px; padding:0 12px; color:var(--blue); font-size:.8125rem; }
   .review-panel,.evidence-panel { position:absolute; z-index:20; top:43px; right:0; width:min(390px,calc(100vw - 48px)); padding:18px; border:1px solid var(--border-strong); border-radius:12px; background:#fff; box-shadow:0 18px 45px rgba(15,23,42,.18); }
+  .row-review .review-panel { position:fixed; z-index:100; top:50%; left:50%; right:auto; width:min(460px,calc(100vw - 48px)); max-height:80vh; overflow:auto; transform:translate(-50%,-50%); }
+  .review-close { position:absolute; top:10px; right:10px; min-width:34px; min-height:34px; padding:0; border-color:transparent; background:transparent; color:var(--muted); font-size:1.35rem; }
   .review-panel p,.evidence-panel p { margin:6px 0 14px; color:var(--muted); font-size:.8125rem; }
   .company-override label { display:block; color:#475569; font-size:.75rem; font-weight:700; }
   .company-override input { width:100%; min-height:42px; margin-top:6px; padding:0 12px; border:1px solid var(--border-strong); border-radius:8px; }
@@ -3205,6 +3342,28 @@ _REDESIGN_STYLES = r"""
   .result-intro h2 { margin:0; }
   .result-intro p { margin:2px 0 0; color:var(--muted); }
   .results-table td { min-width:135px; }
+  .deep-research-cell { min-width:174px; display:flex; flex-direction:column; align-items:flex-start; gap:6px; }
+  .deep-research-cell > small { color:var(--muted); font-size:.7rem; }
+  .deep-research-btn { min-height:34px; padding:0 11px; border-color:#bfdbfe; background:var(--blue-soft); color:var(--blue-dark); font-size:.75rem; }
+  .deep-research-btn:hover { border-color:#60a5fa; background:#dbeafe; }
+  .deep-progress { display:flex; align-items:center; gap:6px; max-width:190px; color:var(--muted); font-size:.7rem; line-height:1.3; }
+  .mini-spinner { width:13px; height:13px; flex:0 0 auto; border:2px solid #bfdbfe; border-top-color:var(--blue); border-radius:50%; animation:spin .9s linear infinite; }
+  .deep-error { max-width:210px; color:var(--red)!important; line-height:1.35; }
+  .deep-view { color:var(--blue); cursor:pointer; font-size:.75rem; font-weight:700; }
+  .deep-view:hover { text-decoration:underline; }
+  .deep-panel { position:fixed!important; z-index:100; top:50%!important; left:50%!important; right:auto!important; width:min(620px,calc(100vw - 48px))!important; max-height:min(680px,78vh); overflow:auto; transform:translate(-50%,-50%); }
+  .deep-close { position:absolute; top:10px; right:10px; min-width:34px; min-height:34px; padding:0; border-color:transparent; background:transparent; color:var(--muted); font-size:1.35rem; }
+  .deep-panel-summary { display:flex; align-items:center; gap:10px; margin:8px 0; color:#334155; font-size:.8125rem; }
+  .deep-panel section { margin-top:16px; padding-top:14px; border-top:1px solid var(--border); }
+  .deep-panel h4 { margin:0 0 8px; color:#334155; font-size:.8125rem; }
+  .deep-source-list { display:grid; gap:8px; margin:0; padding:0; list-style:none; }
+  .deep-source { padding:10px; border:1px solid var(--border); border-radius:8px; background:var(--surface-soft); }
+  .deep-source > div { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+  .deep-source a,.deep-source strong { color:var(--blue-dark); font-size:.75rem; font-weight:700; overflow-wrap:anywhere; }
+  .deep-source p { margin:7px 0 0; color:#475569; font-size:.75rem; line-height:1.45; }
+  .source-tags { display:flex; gap:4px; flex:0 0 auto; }
+  .source-tags span { padding:2px 5px; border-radius:999px; background:#e2e8f0; color:#475569; font-size:.625rem; font-weight:700; }
+  .deep-empty { margin:0!important; color:var(--muted); font-size:.75rem!important; }
   .row-evidence .evidence-panel { width:min(460px,calc(100vw - 48px)); }
   .evidence-panel h3 { padding-right:28px; }
   .evidence-preview { display:grid; grid-template-columns:96px 1fr; align-items:center; gap:12px; margin-bottom:14px; text-decoration:none; color:var(--blue); font-size:.8125rem; font-weight:650; }
@@ -3300,19 +3459,24 @@ _REDESIGN_SCRIPT = r"""
   }
 
   document.querySelectorAll('.async-stage-form').forEach(form => {
-    form.addEventListener('submit', event => {
+    form.addEventListener('submit', async event => {
       event.preventDefault();
       const button = form.querySelector('button');
       if (!button || button.disabled) return;
+      const originalLabel = button.textContent;
       button.disabled = true;
       button.textContent = 'Matching companies…';
       workflowWasBusy = true;
-      fetch(form.action, {method:'POST', redirect:'follow'}).catch(() => {
+      try {
+        const response = await fetch(form.action, {method:'POST', redirect:'follow'});
+        if (!response.ok) throw new Error('Company review could not be started.');
+        window.location.reload();
+      } catch (_error) {
         workflowWasBusy = false;
         button.disabled = false;
-        button.textContent = 'Review Companies';
-      });
-      window.setTimeout(() => window.location.reload(), 350);
+        button.textContent = originalLabel || 'Review Companies';
+        window.alert('Company review could not be started. Please try again.');
+      }
     });
   });
 
@@ -3372,6 +3536,69 @@ _REDESIGN_SCRIPT = r"""
       button.textContent = 'Suggest company';
       if (statusEl) { statusEl.textContent = error.message; statusEl.className = 'ai-status-msg error'; }
     }
+  });
+
+  const researchMessages = [
+    'Searching official sources...',
+    'Checking job postings and company pages...',
+    'Separating customer evidence from partner evidence...',
+    'Cross-checking external sources...',
+    'Preparing the evidence summary...'
+  ];
+
+  async function pollDeepResearch(personId, cell, button, messageTimer) {
+    try {
+      const response = await fetch(`/api/people/${personId}/deep-research`, {cache:'no-store'});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not read research progress.');
+      const status = data.research?.request_status || 'idle';
+      if (status === 'completed') { window.clearInterval(messageTimer); window.location.reload(); return; }
+      if (status === 'failed') throw new Error(data.research?.last_error || 'Deep Research could not be completed.');
+      window.setTimeout(() => pollDeepResearch(personId, cell, button, messageTimer), 1500);
+    } catch (error) {
+      window.clearInterval(messageTimer);
+      button.disabled = false;
+      button.textContent = button.dataset.force === 'true' ? 'Run again' : 'Deep Research';
+      const progress = cell.querySelector('.deep-progress');
+      if (progress) { progress.hidden = false; progress.textContent = error.message; progress.classList.add('deep-error'); }
+    }
+  }
+
+  document.addEventListener('click', async event => {
+    const button = event.target.closest('.deep-research-btn');
+    if (!button || button.disabled) return;
+    const cell = button.closest('.deep-research-cell');
+    const progress = cell?.querySelector('.deep-progress');
+    const message = cell?.querySelector('[data-research-message]');
+    button.disabled = true;
+    button.textContent = 'Researching...';
+    if (progress) { progress.hidden = false; progress.classList.remove('deep-error'); }
+    let messageIndex = 0;
+    if (message) message.textContent = researchMessages[0];
+    const messageTimer = window.setInterval(() => {
+      messageIndex = (messageIndex + 1) % researchMessages.length;
+      if (message) message.textContent = researchMessages[messageIndex];
+    }, 2600);
+    try {
+      const body = new URLSearchParams({force:button.dataset.force || 'false', research_depth:'deep'});
+      const response = await fetch(`/api/people/${button.dataset.personId}/deep-research`, {
+        method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body
+      });
+      const data = await response.json();
+      if (!response.ok && response.status !== 409) throw new Error(data.error || 'Deep Research could not start.');
+      if (data.cached) { window.clearInterval(messageTimer); window.location.reload(); return; }
+      pollDeepResearch(button.dataset.personId, cell, button, messageTimer);
+    } catch (error) {
+      window.clearInterval(messageTimer);
+      button.disabled = false;
+      button.textContent = button.dataset.force === 'true' ? 'Run again' : 'Deep Research';
+      if (progress) { progress.hidden = false; progress.textContent = error.message; progress.classList.add('deep-error'); }
+    }
+  });
+
+  document.addEventListener('click', event => {
+    const close = event.target.closest('.deep-close, .review-close');
+    if (close) close.closest('details')?.removeAttribute('open');
   });
 
   if (workflowWasBusy) pollProgress();
@@ -3454,6 +3681,22 @@ def _page(request: Request, selected_run: int | None = None) -> str:
         <div class="workflow-step {step_state(3)}"><span class="step-dot">4</span><span class="step-label">Results</span></div>
       </nav>"""
 
+    review_notice = ""
+    if run and run.get("status") in {"needs_attention", "failed"}:
+        errors = [str(row.get("resolution_error") or "") for row in rows]
+        network_error = any(
+            "proxyerror" in error.casefold() or "unable to connect to proxy" in error.casefold()
+            for error in errors
+        )
+        if network_error:
+            notice_copy = "Company matching could not reach Apollo. Check the network or proxy settings, then try again."
+        elif run.get("status") == "failed":
+            notice_copy = "Company matching stopped before it finished. Try again or open Advanced options for details."
+        else:
+            notice_copy = "Company matching finished, but some records still need attention. Open Review to confirm them."
+        notice_tone = " error" if run.get("status") == "failed" or network_error else ""
+        review_notice = f'<div class="workflow-notice{notice_tone}" role="status">{_escape(notice_copy)}</div>'
+
     if not run:
         main_surface = """
           <section class="upload-card">
@@ -3473,6 +3716,7 @@ def _page(request: Request, selected_run: int | None = None) -> str:
         main_surface = f"""
           <section class="work-surface">
             <header class="surface-header"><div><h2>Review Companies</h2><p>We’ll match each person with their company, then flag anything uncertain for review.</p></div><div class="surface-actions"><form class="async-stage-form" data-stage="enrich" method="post" action="/runs/{selected_run}/enrich"><button class="primary">Review Companies</button></form></div></header>
+            {review_notice}
             <div class="table-tools"><label class="search-wrap"><span class="sr-only">Search contacts or companies</span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="m16 16 4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><input class="search-input" data-table-search placeholder="Search contacts or companies…"></label><button type="button" class="filter-button" data-review-filter aria-pressed="false">Needs review</button></div>
             {_review_companies_table(rows)}
             <footer class="surface-footer"><span>Showing {len(rows)} contacts</span><form class="async-stage-form" data-stage="enrich" method="post" action="/runs/{selected_run}/enrich"><button class="primary">Review Companies</button></form></footer>
@@ -3784,6 +4028,132 @@ def ai_resolve_company(
 
 
 
+
+
+def _run_deep_research_task(database: WorkflowDatabase, person_id: int, settings: Any) -> None:
+    person = database.person(person_id)
+    if not person:
+        return
+    rows = database.report_rows(int(person["run_id"]))
+    row = next((item for item in rows if int(item["person_id"]) == person_id), person)
+    context = {
+        "servicenow_customer": row.get("servicenow_customer"),
+        "servicenow_matched_name": row.get("servicenow_matched_name"),
+        "match_score": row.get("match_score"),
+        "check_status": row.get("check_status"),
+        "headline": row.get("headline"),
+        "headquarters": row.get("headquarters"),
+        "country": row.get("country"),
+        "apollo_company_name": row.get("apollo_company_name"),
+        "company_linkedin_url": row.get("company_linkedin_url"),
+    }
+    try:
+        provider = OpenAIResearchProvider(
+            str(settings.openai_api_key or ""),
+            model=settings.deep_research_model,
+            timeout_seconds=settings.deep_research_request_timeout_seconds,
+        )
+        crawler = BoundedOfficialCrawler(
+            max_pages=settings.deep_research_max_pages,
+            page_timeout_seconds=settings.deep_research_page_timeout_seconds,
+            max_content_chars=settings.deep_research_max_content_chars,
+            max_elapsed_seconds=min(60.0, settings.deep_research_request_timeout_seconds),
+        )
+        result = DeepResearchService(provider=provider, crawler=crawler).research(
+            company_name=str(person.get("company_name") or ""),
+            official_domain=str(person.get("company_domain") or ""),
+            existing_context=context,
+            research_depth="deep",
+        )
+        database.complete_deep_research(person_id, result.as_storage_values())
+    except Exception as exc:
+        LOGGER.exception("Deep research failed for person_id=%s", person_id)
+        database.fail_deep_research(person_id, str(exc) or "Deep Research could not be completed.")
+
+
+@app.get("/api/people/{person_id}/deep-research")
+def get_deep_research(person_id: int) -> JSONResponse:
+    if not DATABASE.person(person_id):
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "error": "Person record not found."},
+        )
+    return JSONResponse(
+        content={
+            "success": True,
+            "research": DATABASE.deep_research(person_id) or {"request_status": "idle"},
+        }
+    )
+
+
+@app.post("/api/people/{person_id}/deep-research")
+def start_deep_research(
+    person_id: int,
+    background_tasks: BackgroundTasks,
+    force: bool = Form(False),
+    research_depth: str = Form("deep"),
+) -> JSONResponse:
+    person = DATABASE.person(person_id)
+    if not person:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "error": "Person record not found."},
+        )
+    if research_depth != "deep":
+        return JSONResponse(
+            status_code=422,
+            content={"success": False, "error": "Only deep research is supported."},
+        )
+    company_name = str(person.get("company_name") or "").strip()
+    official_domain = str(person.get("company_domain") or "").strip()
+    if not company_name or not official_domain:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "success": False,
+                "error": "Resolve the company and its official website before running Deep Research.",
+            },
+        )
+    existing = DATABASE.deep_research(person_id)
+    if existing and existing.get("request_status") == "running":
+        return JSONResponse(
+            status_code=409,
+            content={"success": False, "error": "Deep Research is already running.", "research": existing},
+        )
+
+    settings = load_settings()
+    if not settings.openai_api_key:
+        return JSONResponse(
+            status_code=503,
+            content={"success": False, "error": "Add OPENAI_API_KEY to enable Deep Research."},
+        )
+    if not force and DATABASE.deep_research_is_fresh(person_id, settings.deep_research_cache_days):
+        return JSONResponse(
+            content={"success": True, "cached": True, "research": DATABASE.deep_research(person_id)},
+        )
+
+    claimed = DATABASE.claim_deep_research(
+        person_id=person_id,
+        run_id=int(person["run_id"]),
+        company_name=company_name,
+        official_domain=official_domain,
+        research_depth=research_depth,
+        model_provider=f"openai:{settings.deep_research_model}+deterministic-rules",
+    )
+    if not claimed:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "success": False,
+                "error": "Deep Research is already running.",
+                "research": DATABASE.deep_research(person_id),
+            },
+        )
+    background_tasks.add_task(_run_deep_research_task, DATABASE, person_id, settings)
+    return JSONResponse(
+        status_code=202,
+        content={"success": True, "cached": False, "research": DATABASE.deep_research(person_id)},
+    )
 
 
 @app.post("/runs/{run_id}/launch-browser")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -73,13 +73,44 @@ class WorkflowDatabase:
                     n8n_sent_at TEXT NOT NULL DEFAULT '',
                     n8n_received_at TEXT NOT NULL DEFAULT ''
                 );
+                CREATE TABLE IF NOT EXISTS deep_research_results (
+                    id INTEGER PRIMARY KEY,
+                    person_id INTEGER NOT NULL UNIQUE REFERENCES people(id) ON DELETE CASCADE,
+                    run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                    company_name TEXT NOT NULL,
+                    official_domain TEXT NOT NULL,
+                    request_status TEXT NOT NULL DEFAULT 'idle',
+                    classification_status TEXT NOT NULL DEFAULT '',
+                    confidence INTEGER NOT NULL DEFAULT 0,
+                    summary TEXT NOT NULL DEFAULT '',
+                    customer_evidence TEXT NOT NULL DEFAULT '[]',
+                    partner_evidence TEXT NOT NULL DEFAULT '[]',
+                    ambiguous_evidence TEXT NOT NULL DEFAULT '[]',
+                    sources_checked INTEGER NOT NULL DEFAULT 0,
+                    relevant_sources INTEGER NOT NULL DEFAULT 0,
+                    research_depth TEXT NOT NULL DEFAULT 'deep',
+                    model_provider TEXT NOT NULL DEFAULT '',
+                    started_at TEXT NOT NULL DEFAULT '',
+                    researched_at TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT '',
+                    last_error TEXT NOT NULL DEFAULT ''
+                );
                 CREATE INDEX IF NOT EXISTS idx_people_run ON people(run_id);
                 CREATE INDEX IF NOT EXISTS idx_checks_run ON company_checks(run_id);
+                CREATE INDEX IF NOT EXISTS idx_deep_research_run ON deep_research_results(run_id);
                 """
             )
             self._ensure_column(conn, "people", "company_domain", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "people", "company_linkedin_url", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "company_checks", "screenshot_path", "TEXT NOT NULL DEFAULT ''")
+            stale_cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
+            conn.execute(
+                """UPDATE deep_research_results
+                SET request_status = 'failed', last_error = 'Research was interrupted; run it again.',
+                    updated_at = ?
+                WHERE request_status = 'running' AND started_at < ?""",
+                (now(), stale_cutoff),
+            )
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -138,12 +169,20 @@ class WorkflowDatabase:
         domain: str = "", company_linkedin_url: str = "",
     ) -> None:
         with self.connect() as conn:
+            previous = conn.execute(
+                "SELECT company_name, company_domain FROM people WHERE id = ?", (person_id,)
+            ).fetchone()
             conn.execute(
                 """UPDATE people SET company_name = ?, company_domain = ?, company_linkedin_url = ?,
                 resolution_status = ?, resolution_error = ?
                 WHERE id = ?""",
                 (company_name, domain, company_linkedin_url, status, error, person_id),
             )
+            if previous and (
+                str(previous["company_name"]) != company_name
+                or str(previous["company_domain"]) != domain
+            ):
+                conn.execute("DELETE FROM deep_research_results WHERE person_id = ?", (person_id,))
 
     def reset_check_for_company_change(
         self, person_id: int, run_id: int, company_name: str
@@ -172,6 +211,8 @@ class WorkflowDatabase:
                 "n8n_received_at": "",
             },
         )
+        with self.connect() as conn:
+            conn.execute("DELETE FROM deep_research_results WHERE person_id = ?", (person_id,))
 
     def upsert_check(self, person_id: int, run_id: int, values: dict[str, str]) -> None:
         columns = ["person_id", "run_id", *values.keys()]
@@ -230,9 +271,24 @@ class WorkflowDatabase:
                    c.screenshot_path,
                    c.check_status, c.headquarters, c.country, c.country_code,
                    c.apollo_company_name, c.error_message, c.checked_at,
-                   c.n8n_status, c.n8n_response, c.n8n_sent_at, c.n8n_received_at
+                   c.n8n_status, c.n8n_response, c.n8n_sent_at, c.n8n_received_at,
+                   d.request_status AS dr_request_status,
+                   d.classification_status AS dr_classification_status,
+                   d.confidence AS dr_confidence,
+                   d.summary AS dr_summary,
+                   d.customer_evidence AS dr_customer_evidence,
+                   d.partner_evidence AS dr_partner_evidence,
+                   d.ambiguous_evidence AS dr_ambiguous_evidence,
+                   d.sources_checked AS dr_sources_checked,
+                   d.relevant_sources AS dr_relevant_sources,
+                   d.research_depth AS dr_research_depth,
+                   d.model_provider AS dr_model_provider,
+                   d.started_at AS dr_started_at,
+                   d.researched_at AS dr_researched_at,
+                   d.last_error AS dr_last_error
             FROM people p JOIN runs r ON r.id = p.run_id
             LEFT JOIN company_checks c ON c.person_id = p.id
+            LEFT JOIN deep_research_results d ON d.person_id = p.id
         """
         parameters: tuple[Any, ...] = ()
         if run_id is not None:
@@ -241,6 +297,140 @@ class WorkflowDatabase:
         query += " ORDER BY r.id DESC, p.id"
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(query, parameters).fetchall()]
+
+    @staticmethod
+    def _research_record(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        record = dict(row)
+        for key in ("customer_evidence", "partner_evidence", "ambiguous_evidence"):
+            try:
+                parsed = json.loads(record.get(key) or "[]")
+                record[key] = parsed if isinstance(parsed, list) else []
+            except json.JSONDecodeError:
+                record[key] = []
+        return record
+
+    def deep_research(self, person_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM deep_research_results WHERE person_id = ?", (person_id,)
+            ).fetchone()
+        return self._research_record(row)
+
+    def begin_deep_research(
+        self,
+        *,
+        person_id: int,
+        run_id: int,
+        company_name: str,
+        official_domain: str,
+        research_depth: str = "deep",
+        model_provider: str = "",
+    ) -> dict[str, Any]:
+        self.claim_deep_research(
+            person_id=person_id,
+            run_id=run_id,
+            company_name=company_name,
+            official_domain=official_domain,
+            research_depth=research_depth,
+            model_provider=model_provider,
+        )
+        return self.deep_research(person_id) or {}
+
+    def claim_deep_research(
+        self,
+        *,
+        person_id: int,
+        run_id: int,
+        company_name: str,
+        official_domain: str,
+        research_depth: str = "deep",
+        model_provider: str = "",
+    ) -> bool:
+        """Atomically claim a research job, returning False if one is already running."""
+
+        timestamp = now()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """INSERT INTO deep_research_results (
+                    person_id, run_id, company_name, official_domain, request_status,
+                    research_depth, model_provider, started_at, updated_at, last_error
+                ) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, '')
+                ON CONFLICT(person_id) DO UPDATE SET
+                    run_id = excluded.run_id,
+                    company_name = excluded.company_name,
+                    official_domain = excluded.official_domain,
+                    request_status = 'running',
+                    research_depth = excluded.research_depth,
+                    model_provider = excluded.model_provider,
+                    started_at = excluded.started_at,
+                    updated_at = excluded.updated_at,
+                    last_error = ''
+                WHERE deep_research_results.request_status <> 'running'""",
+                (
+                    person_id,
+                    run_id,
+                    company_name,
+                    official_domain,
+                    research_depth,
+                    model_provider,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            return cursor.rowcount > 0
+
+    def complete_deep_research(self, person_id: int, values: dict[str, Any]) -> None:
+        timestamp = now()
+        with self.connect() as conn:
+            conn.execute(
+                """UPDATE deep_research_results SET
+                    request_status = 'completed', classification_status = ?, confidence = ?,
+                    summary = ?, customer_evidence = ?, partner_evidence = ?,
+                    ambiguous_evidence = ?, sources_checked = ?, relevant_sources = ?,
+                    research_depth = ?, model_provider = ?, researched_at = ?,
+                    updated_at = ?, last_error = ''
+                WHERE person_id = ?""",
+                (
+                    str(values.get("classification_status") or ""),
+                    int(values.get("confidence") or 0),
+                    str(values.get("summary") or ""),
+                    json.dumps(values.get("customer_evidence") or [], ensure_ascii=False),
+                    json.dumps(values.get("partner_evidence") or [], ensure_ascii=False),
+                    json.dumps(values.get("ambiguous_evidence") or [], ensure_ascii=False),
+                    int(values.get("sources_checked") or 0),
+                    int(values.get("relevant_sources") or 0),
+                    str(values.get("research_depth") or "deep"),
+                    str(values.get("model_provider") or ""),
+                    str(values.get("researched_at") or timestamp),
+                    timestamp,
+                    person_id,
+                ),
+            )
+
+    def fail_deep_research(self, person_id: int, error: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """UPDATE deep_research_results
+                SET request_status = 'failed', last_error = ?, updated_at = ?
+                WHERE person_id = ?""",
+                (str(error)[:1000], now(), person_id),
+            )
+
+    def deep_research_is_fresh(self, person_id: int, cache_days: int) -> bool:
+        record = self.deep_research(person_id)
+        if not record or record.get("request_status") != "completed":
+            return False
+        researched_at = str(record.get("researched_at") or "")
+        try:
+            researched = datetime.fromisoformat(researched_at)
+            if researched.tzinfo is None:
+                researched = researched.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return False
+        age_seconds = (datetime.now(timezone.utc) - researched).total_seconds()
+        return 0 <= age_seconds <= int(cache_days) * 86400
 
     def summary(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -258,6 +448,7 @@ class WorkflowDatabase:
         """Remove workflow data while retaining the SQLite schema and configuration."""
 
         with self.connect() as conn:
+            conn.execute("DELETE FROM deep_research_results")
             conn.execute("DELETE FROM company_checks")
             conn.execute("DELETE FROM people")
             conn.execute("DELETE FROM runs")

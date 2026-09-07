@@ -38,6 +38,12 @@ class Settings(BaseModel):
     n8n_webhook_url: str | None = None
     app_base_url: str = "http://localhost:8000"
     openai_api_key: str | None = None
+    deep_research_model: str = "gpt-4o"
+    deep_research_max_pages: int = Field(default=12, ge=1, le=40)
+    deep_research_page_timeout_seconds: float = Field(default=8.0, gt=0, le=30)
+    deep_research_request_timeout_seconds: float = Field(default=180.0, gt=0, le=600)
+    deep_research_max_content_chars: int = Field(default=250_000, ge=10_000, le=2_000_000)
+    deep_research_cache_days: int = Field(default=30, ge=1, le=365)
 
     @field_validator("input_csv", "output_csv", "debug_dir", mode="before")
     @classmethod
@@ -116,5 +122,17 @@ def load_settings(env_file: Path | None = None) -> Settings:
         "n8n_webhook_url": dynamic_value("N8N_WEBHOOK_URL") or None,
         "app_base_url": dynamic_value("APP_BASE_URL", "http://localhost:8000"),
         "openai_api_key": dynamic_value("OPENAI_API_KEY") or _optional("OPENAI_API_KEY"),
+        "deep_research_model": dynamic_value("DEEP_RESEARCH_MODEL", "gpt-4o"),
+        "deep_research_max_pages": dynamic_value("DEEP_RESEARCH_MAX_PAGES", "12"),
+        "deep_research_page_timeout_seconds": dynamic_value(
+            "DEEP_RESEARCH_PAGE_TIMEOUT_SECONDS", "8"
+        ),
+        "deep_research_request_timeout_seconds": dynamic_value(
+            "DEEP_RESEARCH_REQUEST_TIMEOUT_SECONDS", "180"
+        ),
+        "deep_research_max_content_chars": dynamic_value(
+            "DEEP_RESEARCH_MAX_CONTENT_CHARS", "250000"
+        ),
+        "deep_research_cache_days": dynamic_value("DEEP_RESEARCH_CACHE_DAYS", "30"),
     }
     return Settings.model_validate(data)

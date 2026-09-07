@@ -392,3 +392,43 @@ def test_ai_resolve_company_endpoint_person_not_found(monkeypatch) -> None:
     assert response.status_code == 404
     payload = json.loads(response.body)
     assert payload["success"] is False
+
+
+def test_review_companies_endpoint_marks_run_busy_and_queues_enrichment(monkeypatch) -> None:
+    updates = []
+
+    class Database:
+        def run(self, run_id):
+            return {"id": run_id, "status": "uploaded"}
+
+        def update_run(self, run_id, **values):
+            updates.append((run_id, values))
+
+    monkeypatch.setattr(dashboard, "DATABASE", Database())
+    tasks = BackgroundTasks()
+
+    response = dashboard.enrich(7, tasks)
+
+    assert response.status_code == 303
+    assert updates == [(7, {"status": "enriching"})]
+    assert len(tasks.tasks) == 1
+    assert tasks.tasks[0].func is dashboard.run_enrichment
+
+
+def test_review_companies_script_waits_for_start_response_before_reload() -> None:
+    script = dashboard._REDESIGN_SCRIPT
+
+    assert "const response = await fetch(form.action" in script
+    assert "if (!response.ok)" in script
+    assert "window.setTimeout(() => window.location.reload(), 350)" not in script
+
+
+def test_company_review_turns_proxy_failure_into_actionable_copy() -> None:
+    row = _row("unresolved", "Apollo request failed: ProxyError unable to connect to proxy")
+
+    html = dashboard._review_companies_table([row])
+
+    assert "Check the network or proxy settings" in html
+    assert "Matching details" in html
+    assert "ProxyError" in html
+    assert 'class="review-close"' in html
