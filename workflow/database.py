@@ -138,8 +138,8 @@ class WorkflowDatabase:
                 conn.execute(
                     """INSERT INTO people (
                         run_id, row_number, person_name, linkedin_url, headline,
-                        supplied_company_name, raw_input
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        supplied_company_name, company_name, resolution_status, raw_input
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         run_id,
                         row_number,
@@ -147,6 +147,8 @@ class WorkflowDatabase:
                         person["linkedin_url"],
                         person.get("headline", ""),
                         person.get("company_name", ""),
+                        person.get("company_name", ""),
+                        "csv_supplied" if person.get("company_name", "").strip() else "pending",
                         json.dumps(person.get("raw_input", {}), ensure_ascii=False),
                     ),
                 )

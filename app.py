@@ -2473,7 +2473,7 @@ def _legacy_page(request: Request, selected_run: int | None = None) -> str:
           <div>
             <span class="section-kicker">Step 1 &middot; Import Data</span>
             <h2>Upload Prospect Accounts</h2>
-            <p class="muted">Include each person’s name and LinkedIn URL. Apollo data is used for automatic company resolution.</p>
+            <p class="muted">Rows with a company name go directly to company enrichment. For other rows, include the person’s name and LinkedIn URL for automatic company resolution.</p>
           </div>
         </div>
         <form method="post" action="/runs" enctype="multipart/form-data">

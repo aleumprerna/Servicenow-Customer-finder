@@ -46,6 +46,35 @@ def test_headline_current_role_header_is_recognized() -> None:
     assert people[0]["headline"] == "Head of Corporate Affairs at Harbour Energy"
 
 
+def test_company_only_csv_row_is_accepted() -> None:
+    people = parse_people_csv(b"Company\nExample Corp\n")
+
+    assert people[0]["company_name"] == "Example Corp"
+    assert people[0]["person_name"] == "x_person"
+    assert people[0]["linkedin_url"] == ""
+
+
+def test_supplied_csv_company_is_trusted_without_person_lookup(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = WorkflowDatabase(tmp_path / "workflow.db")
+    database.initialize()
+    run_id = database.create_run(
+        "companies.csv",
+        [{"person_name": "Ada", "linkedin_url": "https://linkedin.com/in/ada", "company_name": "Direct Corp"}],
+    )
+
+    monkeypatch.setattr(
+        "workflow.service._apollo",
+        lambda _settings: (_ for _ in ()).throw(AssertionError("Apollo must not be created")),
+    )
+
+    resolved = resolve_people(database, run_id, object())  # type: ignore[arg-type]
+
+    assert resolved[0]["company_name"] == "Direct Corp"
+    assert resolved[0]["resolution_status"] == "csv_supplied"
+
+
 class FakeApollo:
     def person_company(self, linkedin_url: str, person_name: str) -> PersonOrganization:
         assert linkedin_url == "https://linkedin.com/in/ada"

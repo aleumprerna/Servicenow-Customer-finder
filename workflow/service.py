@@ -27,6 +27,7 @@ from workflow.person_company import PersonCompanyResolver
 RUNS_DIR = PROJECT_ROOT / "data" / "runs"
 TRUSTED_COMPANY_STATUSES = {
     "apollo_structurally_verified",
+    "csv_supplied",
     "manual_verified",
 }
 
@@ -54,24 +55,30 @@ def parse_people_csv(raw: bytes) -> list[dict[str, Any]]:
     linkedin_key = find("linkedinurl", "profileurl", "linkedinprofileurl", "profile")
     company_key = find("companyname", "company", "organization", "employer")
     headline_key = find("headline", "headlinecurrentrole", "currentrole", "title")
-    if not person_key or not linkedin_key:
+    if not company_key and (not person_key or not linkedin_key):
         raise ValueError(
-            "CSV needs person name and LinkedIn URL columns (for example: Name, Profile URL)"
+            "CSV needs a company column, or person name and LinkedIn URL columns "
+            "(for example: Company, or Name and Profile URL)"
         )
 
     people: list[dict[str, Any]] = []
     for source_row, row in enumerate(reader, start=2):
-        person_name = (row.get(person_key) or "").strip()
-        linkedin_url = (row.get(linkedin_key) or "").strip()
-        if not person_name and not linkedin_url:
+        person_name = (row.get(person_key) or "").strip() if person_key else ""
+        linkedin_url = (row.get(linkedin_key) or "").strip() if linkedin_key else ""
+        company_name = (row.get(company_key) or "").strip() if company_key else ""
+        if not person_name and not linkedin_url and not company_name:
             continue
-        if not person_name or not linkedin_url:
-            raise ValueError(f"Row {source_row} needs both a person name and LinkedIn URL")
+        if not company_name and (not person_name or not linkedin_url):
+            raise ValueError(
+                f"Row {source_row} needs a company name, or both a person name and LinkedIn URL"
+            )
+        if company_name and not person_name and not linkedin_url:
+            person_name = "x_person"
         people.append(
             {
                 "person_name": person_name,
                 "linkedin_url": linkedin_url,
-                "company_name": (row.get(company_key) or "").strip() if company_key else "",
+                "company_name": company_name,
                 "headline": (row.get(headline_key) or "").strip() if headline_key else "",
                 "raw_input": row,
             }
@@ -92,7 +99,7 @@ def _apollo(settings: Settings) -> ApolloClient:
 
 
 def resolve_people(database: WorkflowDatabase, run_id: int, settings: Settings) -> list[dict[str, Any]]:
-    resolver = PersonCompanyResolver(_apollo(settings))
+    resolver: PersonCompanyResolver | None = None
     people = database.people_for_run(run_id)
     for person in people:
         # A trusted company is already resolved. Reusing it keeps repeat
@@ -102,6 +109,14 @@ def resolve_people(database: WorkflowDatabase, run_id: int, settings: Settings) 
             and person["resolution_status"] in TRUSTED_COMPANY_STATUSES
         ):
             continue
+        supplied_company = person["supplied_company_name"].strip()
+        if supplied_company:
+            database.update_person_resolution(
+                person["id"], company_name=supplied_company, status="csv_supplied"
+            )
+            continue
+        if resolver is None:
+            resolver = PersonCompanyResolver(_apollo(settings))
         result = resolver.resolve(
             person_name=person["person_name"],
             linkedin_url=person["linkedin_url"],
