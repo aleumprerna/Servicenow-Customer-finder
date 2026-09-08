@@ -266,6 +266,7 @@ class BoundedOfficialCrawler:
                         url=final_url,
                         page_title=title,
                         official_domain=domain,
+                        citation_grounded=True,
                     )
                 )
             candidates: list[str] = []

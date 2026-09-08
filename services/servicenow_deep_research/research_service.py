@@ -205,7 +205,11 @@ class LLMResearchProvider:
         source_urls: set[str],
     ) -> list[EvidenceFinding]:
         output: list[EvidenceFinding] = []
-        source_keys = {_source_key(url) for url in source_urls}
+        # Fail closed.  Without provider grounding metadata, every URL in the
+        # generated JSON is untrusted model output.
+        sources_by_key = {_source_key(url): url for url in source_urls}
+        if not sources_by_key:
+            return output
         raw_findings = payload.get("findings", [])
         if not isinstance(raw_findings, list):
             return output
@@ -216,11 +220,26 @@ class LLMResearchProvider:
                 finding = normalize_model_finding(raw, domain)
             except ValueError:
                 continue
-            if finding is None or (official_only and not is_official_url(finding.url, domain)):
+            if finding is None:
                 continue
-            if source_keys and _source_key(finding.url) not in source_keys:
+            grounded_url = sources_by_key.get(_source_key(finding.url))
+            if not grounded_url:
                 continue
-            output.append(finding)
+            official_source = is_official_url(grounded_url, domain)
+            if official_only and not official_source:
+                continue
+            # Store the URL supplied by the search provider, not the model's
+            # reconstructed spelling of it.  This also preserves a provider's
+            # canonical path and query parameters.
+            output.append(
+                finding.model_copy(
+                    update={
+                        "url": grounded_url,
+                        "official_source": official_source,
+                        "citation_grounded": True,
+                    }
+                )
+            )
         return output
 
     def discover(
@@ -248,7 +267,9 @@ Separate end-customer evidence from partner, reseller, consulting, integrator, o
 A ServiceNow partnership or implementing ServiceNow for clients NEVER proves internal customer usage.
 Return JSON only with this shape:
 {{"findings":[{{"url":"https://...","page_title":"...","evidence":"short factual excerpt or close paraphrase","evidence_type":"explicit_internal_usage|internal_role_or_platform_management|partner_or_service_provider|generic_reference","strength":"strong|medium|weak","category":"CUSTOMER_EVIDENCE|PARTNER_EVIDENCE|AMBIGUOUS"}}]}}
-Do not invent URLs or evidence. Return an empty findings list when evidence is absent.
+For every finding, copy the exact URL of the search result that contains that finding's evidence.
+Never reconstruct, shorten, or guess a URL, and never attach evidence from one result to another
+result's URL. Do not invent URLs or evidence. Return an empty findings list when evidence is absent.
 """.strip()
         search_tool: dict[str, Any] = {"type": "web_search", "search_context_size": "high"}
         if official_only:
