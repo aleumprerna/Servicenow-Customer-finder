@@ -444,9 +444,10 @@ def test_customer_story_result_is_persisted_and_rendered_as_servicenow_yes(tmp_p
 
     assert stored["servicenow_customer_page_found"] == 1
     assert row["dr_servicenow_customer_page_found"] == 1
-    assert "ServiceNow user" in html
+    assert "ServiceNow customer" in html
     assert ">Yes<" in html
     assert "View official page" in html
+    assert 'aria-label="Serial number 1">1</span>' in html
 
 
 def test_start_endpoint_returns_cached_result_without_adding_task(monkeypatch) -> None:

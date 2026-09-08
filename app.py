@@ -3205,7 +3205,7 @@ def _deep_research_cell(row: dict[str, Any]) -> str:
 
 def _simplified_results_table(rows: list[dict[str, Any]]) -> str:
     body: list[str] = []
-    for row in rows:
+    for serial_number, row in enumerate(rows, start=1):
         evidence = parse_n8n_evidence(
             str(row.get("n8n_status") or ""), str(row.get("n8n_response") or "")
         )
@@ -3242,7 +3242,7 @@ def _simplified_results_table(rows: list[dict[str, Any]]) -> str:
         body.append(
             f"""
             <tr data-search="{person_name} {headline} {company} {location} {customer_label} {partner_label} {opportunity_label}">
-              <td><div class="contact-cell"><span class="contact-avatar" aria-hidden="true">{_avatar_initials(str(row.get('person_name') or ''))}</span><span><strong>{_table_person_link(row)}</strong><small>{headline}</small></span></div></td>
+              <td><div class="contact-cell"><span class="contact-avatar" aria-label="Serial number {serial_number}">{serial_number}</span><span><strong>{_table_person_link(row)}</strong><small>{headline}</small></span></div></td>
               <td><strong>{company}</strong><small>{location}</small></td>
               <td>{_status_pill(customer_label, customer_tone)}{customer_story_link}</td>
               <td>{_status_pill(partner_label, 'info') if partner_label != '—' else '<span class="no-action">—</span>'}</td>
@@ -3256,7 +3256,7 @@ def _simplified_results_table(rows: list[dict[str, Any]]) -> str:
     return f"""
       <div class="table-wrap">
         <table class="review-table results-table">
-          <thead><tr><th>Contact</th><th>Company</th><th>ServiceNow user</th><th>Partner</th><th>Opportunity</th><th>Deep Research</th><th><span class="sr-only">Action</span></th></tr></thead>
+          <thead><tr><th>Contact</th><th>Company</th><th>ServiceNow customer</th><th>Partner</th><th>Opportunity</th><th>Deep Research</th><th><span class="sr-only">Action</span></th></tr></thead>
           <tbody>{''.join(body)}</tbody>
         </table>
       </div>"""
