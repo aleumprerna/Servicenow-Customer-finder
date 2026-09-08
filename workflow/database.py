@@ -185,7 +185,14 @@ class WorkflowDatabase:
                 conn.execute("DELETE FROM deep_research_results WHERE person_id = ?", (person_id,))
 
     def reset_check_for_company_change(
-        self, person_id: int, run_id: int, company_name: str
+        self,
+        person_id: int,
+        run_id: int,
+        company_name: str,
+        *,
+        headquarters: str = "",
+        country: str = "",
+        country_code: str = "",
     ) -> None:
         """Queue only a corrected company for fresh enrichment and automation."""
 
@@ -199,9 +206,9 @@ class WorkflowDatabase:
                 "screenshot_path": "",
                 "match_score": "",
                 "check_status": "pending",
-                "headquarters": "",
-                "country": "",
-                "country_code": "",
+                "headquarters": headquarters,
+                "country": country,
+                "country_code": country_code,
                 "apollo_company_name": "",
                 "error_message": "",
                 "checked_at": "",

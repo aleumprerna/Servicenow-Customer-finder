@@ -4,11 +4,25 @@ import json
 import logging
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from config import load_settings
+from services.country_normalizer import CountryNormalizationError, normalize_country
 from services.gemini_client import GeminiClient
 
 logger = logging.getLogger(__name__)
+
+
+def _valid_source_urls(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    output: list[str] = []
+    for item in value[:10]:
+        url = str(item or "").strip().rstrip("/")
+        parsed = urlsplit(url)
+        if parsed.scheme in {"http", "https"} and parsed.netloc and url not in output:
+            output.append(url)
+    return output
 
 
 def extract_company_from_headline(headline: str) -> str:
@@ -46,6 +60,8 @@ def resolve_company_from_web(
     base_url: str | None = None,
     model: str | None = None,
     provider: str | None = None,
+    require_headquarters: bool = False,
+    require_grounding: bool = False,
 ) -> dict[str, Any]:
     """Search the web to resolve a person's current company from their LinkedIn profile.
 
@@ -57,6 +73,7 @@ def resolve_company_from_web(
     key = api_key or settings.llm_api_key
     selected_model = model or settings.llm_model
     selected_base_url = base_url or settings.llm_base_url
+    failure_reason = ""
 
     # 1. Attempt resolution with the configured model if its API key is present.
     if key:
@@ -72,9 +89,19 @@ def resolve_company_from_web(
                     if provider_name in {"openai", "gemini"}
                     else "Use only the supplied profile URL and headline context. Do not claim to have browsed the web.\n"
                 )
+                + "Confirm the person's CURRENT employer, not a previous employer. Find the "
+                "company's official headquarters from a reliable company or business source.\n"
+                + "You MUST use web search and provide at least one exact supporting URL that "
+                "confirms the current employer or company headquarters.\n"
                 + "Return ONLY a valid JSON object in the exact format:\n"
                 "{\n"
                 '  "company_name": "Company Name",\n'
+                '  "headquarters": "City and state/region, without country",\n'
+                '  "country": "Full country name",\n'
+                '  "country_code": "ISO 3166-1 alpha-2 code",\n'
+                '  "company_domain": "company.example",\n'
+                '  "company_linkedin_url": "https://www.linkedin.com/company/...",\n'
+                '  "source_urls": ["https://supporting-source.example/page"],\n'
                 '  "confidence": "high|medium|low",\n'
                 '  "reason": "Brief explanation with sources"\n'
                 "}\n"
@@ -90,6 +117,7 @@ def resolve_company_from_web(
                     retry_base_seconds=settings.gemini_retry_base_seconds,
                 ).generate(prompt, use_google_search=True, use_url_context=True)
                 raw_text = result.text
+                source_urls = sorted(result.source_urls)
             elif provider_name == "openai":
                 import openai
 
@@ -100,6 +128,7 @@ def resolve_company_from_web(
                     input=prompt,
                 )
                 raw_text = getattr(response, "output_text", str(response)).strip()
+                source_urls = []
             else:
                 import openai
 
@@ -110,6 +139,7 @@ def resolve_company_from_web(
                     temperature=0,
                 )
                 raw_text = str(response.choices[0].message.content or "").strip()
+                source_urls = []
 
             # Parse JSON from response
             json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
@@ -117,21 +147,61 @@ def resolve_company_from_web(
                 data = json.loads(json_match.group(0))
                 company_name = str(data.get("company_name") or "").strip()
                 if company_name and company_name.casefold() not in {"null", "none", "unknown", "n/a"}:
-                    return {
-                        "success": True,
-                        "company_name": company_name,
-                        "confidence": str(data.get("confidence") or "medium"),
-                        "reason": str(data.get("reason") or "Resolved via web search"),
-                        "source": (
-                            "openai_web_search"
-                            if provider_name == "openai"
-                            else "gemini_google_search"
-                            if provider_name == "gemini"
-                            else "glm_profile_context"
-                        ),
-                    }
+                    source_urls = list(
+                        dict.fromkeys([*source_urls, *_valid_source_urls(data.get("source_urls"))])
+                    )
+                    country = str(data.get("country") or "").strip()
+                    country_code = str(data.get("country_code") or "").strip().upper()
+                    try:
+                        country_code = normalize_country(country_code or country) if (country_code or country) else ""
+                    except CountryNormalizationError:
+                        country_code = ""
+                    headquarters = str(data.get("headquarters") or "").strip()
+                    validation_error = ""
+                    if require_headquarters and (not headquarters or not country or not country_code):
+                        validation_error = (
+                            f"AI found {company_name}, but could not verify its headquarters and country."
+                        )
+                    elif require_grounding and provider_name == "gemini" and not source_urls:
+                        validation_error = (
+                            f"AI found {company_name}, but returned no supporting web source."
+                        )
+                    if validation_error:
+                        failure_reason = validation_error
+                    else:
+                        return {
+                            "success": True,
+                            "company_name": company_name,
+                            "headquarters": headquarters,
+                            "country": country,
+                            "country_code": country_code,
+                            "company_domain": str(data.get("company_domain") or "").strip(),
+                            "company_linkedin_url": str(
+                                data.get("company_linkedin_url") or ""
+                            ).strip(),
+                            "confidence": str(data.get("confidence") or "medium"),
+                            "reason": str(data.get("reason") or "Resolved via web search"),
+                            "source_urls": source_urls,
+                            "source": (
+                                "openai_web_search"
+                                if provider_name == "openai"
+                                else "gemini_google_search"
+                                if provider_name == "gemini"
+                                else "glm_profile_context"
+                            ),
+                        }
         except Exception as exc:
             logger.warning("%s company resolution failed: %s", provider_name.upper(), exc)
+            failure_reason = str(exc)
+
+    if require_headquarters or require_grounding:
+        return {
+            "success": False,
+            "company_name": "",
+            "confidence": "none",
+            "error": failure_reason or "AI could not verify the current company and headquarters.",
+            "source": "unresolved",
+        }
 
     # 2. Fallback: Extract from headline
     headline_company = extract_company_from_headline(headline)
@@ -139,6 +209,11 @@ def resolve_company_from_web(
         return {
             "success": True,
             "company_name": headline_company,
+            "headquarters": "",
+            "country": "",
+            "country_code": "",
+            "company_domain": "",
+            "company_linkedin_url": "",
             "confidence": "medium",
             "reason": f"Extracted from LinkedIn headline: '{headline}'",
             "source": "headline_fallback",

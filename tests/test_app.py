@@ -351,8 +351,8 @@ def test_ai_resolve_company_endpoint_success(monkeypatch) -> None:
         def update_person_resolution(self, person_id, **kwargs):
             updated_resolutions.append((person_id, kwargs))
 
-        def reset_check_for_company_change(self, person_id, run_id, company):
-            reset_checks.append((person_id, run_id, company))
+        def reset_check_for_company_change(self, person_id, run_id, company, **kwargs):
+            reset_checks.append((person_id, run_id, company, kwargs))
 
         def update_run(self, run_id, **kwargs):
             updated_runs.append((run_id, kwargs))
@@ -364,6 +364,11 @@ def test_ai_resolve_company_endpoint_success(monkeypatch) -> None:
         lambda **_kwargs: {
             "success": True,
             "company_name": "Harbour Energy",
+            "headquarters": "Aberdeen, Scotland",
+            "country": "United Kingdom",
+            "country_code": "GB",
+            "company_domain": "harbourenergy.com",
+            "company_linkedin_url": "https://linkedin.com/company/harbour-energy",
             "confidence": "high",
             "reason": "Found on LinkedIn",
         },
@@ -376,10 +381,31 @@ def test_ai_resolve_company_endpoint_success(monkeypatch) -> None:
     assert payload["company_name"] == "Harbour Energy"
     assert payload["approved"] is True
     assert updated_resolutions == [
-        (10, {"company_name": "Harbour Energy", "status": "manual_verified", "error": ""})
+        (
+            10,
+            {
+                "company_name": "Harbour Energy",
+                "status": "manual_verified",
+                "error": "",
+                "domain": "harbourenergy.com",
+                "company_linkedin_url": "https://linkedin.com/company/harbour-energy",
+            },
+        )
     ]
-    assert reset_checks == [(10, 3, "Harbour Energy")]
+    assert reset_checks == [
+        (
+            10,
+            3,
+            "Harbour Energy",
+            {
+                "headquarters": "Aberdeen, Scotland",
+                "country": "United Kingdom",
+                "country_code": "GB",
+            },
+        )
+    ]
     assert updated_runs == [(3, {"status": "needs_enrichment"})]
+    assert payload["location"] == "Aberdeen, Scotland, United Kingdom"
 
 
 def test_ai_resolve_company_endpoint_person_not_found(monkeypatch) -> None:

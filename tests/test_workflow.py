@@ -225,6 +225,30 @@ def test_corrected_companies_are_the_only_rows_queued_for_reenrichment(
     assert corrected["servicenow_customer"] == ""
 
 
+def test_ai_company_reset_preserves_suggested_headquarters(tmp_path: Path) -> None:
+    database = WorkflowDatabase(tmp_path / "workflow.db")
+    database.initialize()
+    run_id = database.create_run(
+        "people.csv",
+        [{"person_name": "Ada", "linkedin_url": "https://linkedin.com/in/ada"}],
+    )
+    person_id = database.people_for_run(run_id)[0]["id"]
+
+    database.reset_check_for_company_change(
+        person_id,
+        run_id,
+        "Example Company",
+        headquarters="Copenhagen",
+        country="Denmark",
+        country_code="DK",
+    )
+
+    row = database.report_rows(run_id)[0]
+    assert row["headquarters"] == "Copenhagen"
+    assert row["country"] == "Denmark"
+    assert row["country_code"] == "DK"
+
+
 def test_repeat_resolution_skips_already_trusted_companies(tmp_path: Path, monkeypatch) -> None:
     database = WorkflowDatabase(tmp_path / "workflow.db")
     database.initialize()

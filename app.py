@@ -3529,7 +3529,11 @@ _REDESIGN_SCRIPT = r"""
       const data = await response.json();
       if (!response.ok || !data.success) throw new Error(data.error || 'Could not suggest a company.');
       if (input) input.value = data.company_name;
-      if (statusEl) { statusEl.textContent = `Suggested and confirmed: ${data.company_name}`; statusEl.className = 'ai-status-msg success'; }
+      if (statusEl) {
+        const locationText = data.location ? ` · Headquarters: ${data.location}` : '';
+        statusEl.textContent = `Suggested and confirmed: ${data.company_name}${locationText}`;
+        statusEl.className = 'ai-status-msg success';
+      }
       window.setTimeout(() => window.location.reload(), 650);
     } catch (error) {
       button.disabled = false;
@@ -3942,6 +3946,10 @@ def ai_resolve_company(
 
         headline=headline,
 
+        require_headquarters=True,
+
+        require_grounding=True,
+
     )
 
 
@@ -3965,6 +3973,11 @@ def ai_resolve_company(
 
 
     company = " ".join(str(result["company_name"]).split())
+    headquarters = " ".join(str(result.get("headquarters") or "").split())
+    country = " ".join(str(result.get("country") or "").split())
+    country_code = str(result.get("country_code") or "").strip().upper()
+    company_domain = str(result.get("company_domain") or "").strip()
+    company_linkedin_url = str(result.get("company_linkedin_url") or "").strip()
 
 
 
@@ -3980,9 +3993,20 @@ def ai_resolve_company(
 
             error="",
 
+            domain=company_domain,
+
+            company_linkedin_url=company_linkedin_url,
+
         )
 
-        DATABASE.reset_check_for_company_change(person_id, actual_run_id, company)
+        DATABASE.reset_check_for_company_change(
+            person_id,
+            actual_run_id,
+            company,
+            headquarters=headquarters,
+            country=country,
+            country_code=country_code,
+        )
 
         DATABASE.update_run(actual_run_id, status="needs_enrichment")
 
@@ -3994,11 +4018,21 @@ def ai_resolve_company(
 
                 "company_name": company,
 
+                "headquarters": headquarters,
+
+                "country": country,
+
+                "country_code": country_code,
+
+                "location": ", ".join(item for item in (headquarters, country) if item),
+
                 "approved": True,
 
                 "confidence": result.get("confidence", "medium"),
 
                 "reason": result.get("reason", ""),
+
+                "source_urls": result.get("source_urls", []),
 
                 "message": f"Resolved and approved company: {company}",
 
@@ -4016,11 +4050,21 @@ def ai_resolve_company(
 
             "company_name": company,
 
+            "headquarters": headquarters,
+
+            "country": country,
+
+            "country_code": country_code,
+
+            "location": ", ".join(item for item in (headquarters, country) if item),
+
             "approved": False,
 
             "confidence": result.get("confidence", "medium"),
 
             "reason": result.get("reason", ""),
+
+            "source_urls": result.get("source_urls", []),
 
         }
 

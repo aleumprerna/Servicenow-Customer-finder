@@ -91,7 +91,11 @@ def test_resolve_company_with_gemini_grounded_search() -> None:
     gemini = MagicMock()
     gemini.generate.return_value = GeminiResult(
         text=(
-            '{"company_name":"Harbour Energy","confidence":"high",'
+            '{"company_name":"Harbour Energy","headquarters":"Aberdeen, Scotland",'
+            '"country":"United Kingdom","country_code":"GB",'
+            '"company_domain":"harbourenergy.com",'
+            '"company_linkedin_url":"https://linkedin.com/company/harbour-energy",'
+            '"confidence":"high",'
             '"reason":"Current employer confirmed by search."}'
         ),
         source_urls={"https://example.com/source"},
@@ -122,6 +126,68 @@ def test_resolve_company_with_gemini_grounded_search() -> None:
     }
     assert result["success"] is True
     assert result["source"] == "gemini_google_search"
+    assert result["headquarters"] == "Aberdeen, Scotland"
+    assert result["country"] == "United Kingdom"
+    assert result["country_code"] == "GB"
+    assert result["company_domain"] == "harbourenergy.com"
+
+
+def test_suggest_company_does_not_approve_gemini_result_without_headquarters() -> None:
+    gemini = MagicMock()
+    gemini.generate.return_value = GeminiResult(
+        text=(
+            '{"company_name":"Harbour Energy","headquarters":"",'
+            '"country":"","country_code":"","confidence":"medium"}'
+        ),
+        source_urls={"https://example.com/source"},
+    )
+
+    with patch("services.ai_company_resolver.GeminiClient", return_value=gemini):
+        result = resolve_company_from_web(
+            person_name="Regitze Reeh",
+            linkedin_url="https://linkedin.com/in/regitze-reeh",
+            headline="Head of Corporate Affairs at Harbour Energy",
+            api_key="gemini-fake-key",
+            provider="gemini",
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            model="gemini-3-flash-preview",
+            require_headquarters=True,
+            require_grounding=True,
+        )
+
+    assert result["success"] is False
+    assert "headquarters" in result["error"]
+
+
+def test_suggest_company_accepts_source_urls_returned_inside_gemini_json() -> None:
+    gemini = MagicMock()
+    gemini.generate.return_value = GeminiResult(
+        text=(
+            '{"company_name":"SKF India Ltd.","headquarters":"Pune, Maharashtra",'
+            '"country":"India","country_code":"IN","company_domain":"skf.com",'
+            '"company_linkedin_url":"https://linkedin.com/company/skf-india",'
+            '"source_urls":["https://www.skf.com/in/about-skf-india"],'
+            '"confidence":"high","reason":"Official SKF source."}'
+        ),
+        source_urls=set(),
+    )
+
+    with patch("services.ai_company_resolver.GeminiClient", return_value=gemini):
+        result = resolve_company_from_web(
+            person_name="Example Person",
+            linkedin_url="https://linkedin.com/in/example-person",
+            api_key="gemini-fake-key",
+            provider="gemini",
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            model="gemini-3-flash-preview",
+            require_headquarters=True,
+            require_grounding=True,
+        )
+
+    assert result["success"] is True
+    assert result["company_name"] == "SKF India Ltd."
+    assert result["headquarters"] == "Pune, Maharashtra"
+    assert result["source_urls"] == ["https://www.skf.com/in/about-skf-india"]
 
 
 def test_resolve_company_from_web_fallback_on_openai_error() -> None:
