@@ -15,7 +15,10 @@ from services.servicenow_deep_research.crawler import (
     normalize_domain,
     validate_public_domain,
 )
-from services.servicenow_deep_research.evidence_extractor import evidence_snippets
+from services.servicenow_deep_research.evidence_extractor import (
+    evidence_snippets,
+    normalize_model_finding,
+)
 from services.servicenow_deep_research.research_service import (
     DeepResearchService,
     OpenAIResearchProvider,
@@ -58,6 +61,54 @@ def test_partner_only_evidence_never_becomes_customer_evidence() -> None:
     assert result.status == ResearchClassification.PARTNER_ONLY
     assert not result.customer_evidence
     assert len(result.partner_evidence) == 1
+
+
+def test_partner_marketing_language_never_becomes_customer_evidence() -> None:
+    result = _result_for(
+        "Transformation Starts Here. We empower businesses to scale smarter using ServiceNow "
+        "and innovative digital capabilities. Our expertise helps enterprises design connected "
+        "experiences. ServiceNow Experts 200+. 300+ ServiceNow Implementations."
+    )
+
+    assert result.status == ResearchClassification.PARTNER_ONLY
+    assert not result.customer_evidence
+    assert result.partner_evidence
+
+
+def test_service_provider_using_servicenow_for_clients_is_partner_only() -> None:
+    result = _result_for(
+        "We use ServiceNow to deliver implementation outcomes for our clients as a consulting partner."
+    )
+
+    assert result.status == ResearchClassification.PARTNER_ONLY
+    assert not result.customer_evidence
+
+
+def test_employee_access_to_company_servicenow_portal_is_customer_evidence() -> None:
+    result = _result_for(
+        "Employees from other countries should visit https://example.service-now.com/itdirect "
+        "to contact the internal IT Helpdesk."
+    )
+
+    assert result.status == ResearchClassification.CONFIRMED_CUSTOMER
+
+
+def test_model_cannot_promote_generic_reference_to_customer_evidence() -> None:
+    finding = normalize_model_finding(
+        {
+            "url": "https://example.com/article",
+            "page_title": "Industry article",
+            "evidence": "ServiceNow is an enterprise workflow platform.",
+            "evidence_type": "explicit_internal_usage",
+            "strength": "strong",
+            "category": "CUSTOMER_EVIDENCE",
+        },
+        "example.com",
+    )
+
+    assert finding is not None
+    assert finding.category == "AMBIGUOUS"
+    assert finding.strength == "weak"
 
 
 def test_no_evidence_returns_no_official_evidence_without_guessing() -> None:
@@ -168,6 +219,56 @@ def test_openai_discovery_is_official_domain_scoped_and_source_grounded() -> Non
     assert calls[0]["include"] == ["web_search_call.action.sources"]
     assert calls[0]["text"]["format"]["type"] == "json_schema"
     assert [finding.url for finding in discovery.findings] == ["https://example.com/technology"]
+    assert discovery.findings[0].citation_grounded is True
+
+
+def test_provider_rejects_model_urls_when_grounding_metadata_is_missing() -> None:
+    payload = {
+        "findings": [
+            {
+                "url": "https://example.com/plausible-but-invented-path",
+                "page_title": "Invented",
+                "evidence": "We use ServiceNow internally for IT operations.",
+                "evidence_type": "explicit_internal_usage",
+                "strength": "strong",
+                "category": "CUSTOMER_EVIDENCE",
+            }
+        ]
+    }
+
+    findings = OpenAIResearchProvider._findings(
+        payload,
+        "example.com",
+        official_only=True,
+        source_urls=set(),
+    )
+
+    assert findings == []
+
+
+def test_provider_stores_the_authoritative_grounding_url() -> None:
+    payload = {
+        "findings": [
+            {
+                "url": "https://example.com/evidence?utm_source=gemini",
+                "page_title": "Evidence",
+                "evidence": "We use ServiceNow internally for IT operations.",
+                "evidence_type": "explicit_internal_usage",
+                "strength": "strong",
+                "category": "CUSTOMER_EVIDENCE",
+            }
+        ]
+    }
+
+    findings = OpenAIResearchProvider._findings(
+        payload,
+        "example.com",
+        official_only=True,
+        source_urls={"https://example.com/evidence"},
+    )
+
+    assert findings[0].url == "https://example.com/evidence"
+    assert findings[0].citation_grounded is True
 
 
 def test_research_result_is_persisted_and_reused_from_cache(tmp_path) -> None:
@@ -311,6 +412,7 @@ def test_result_ui_shows_deep_research_action_and_evidence() -> None:
                     "evidence": "We help clients implement ServiceNow.",
                     "strength": "strong",
                     "official_source": True,
+                    "citation_grounded": True,
                 }
             ]
         ),
@@ -328,3 +430,20 @@ def test_result_ui_shows_deep_research_action_and_evidence() -> None:
     assert "View research" in html
     assert "Run again" in html
     assert "Official" in html
+    assert 'href="https://example.com/partners"' in html
+
+
+def test_result_ui_does_not_link_legacy_ungrounded_citation() -> None:
+    html = dashboard._deep_research_evidence_list(
+        [
+            {
+                "url": "https://example.com/invented",
+                "page_title": "Old cached citation",
+                "evidence": "Legacy model output",
+            }
+        ],
+        "No evidence",
+    )
+
+    assert 'href="https://example.com/invented"' not in html
+    assert "Citation not verified; run research again." in html

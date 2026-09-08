@@ -3083,18 +3083,25 @@ def _deep_research_evidence_list(items: Any, empty_copy: str) -> str:
             continue
         url = str(item.get("url") or "")
         safe_url = url if url.startswith(("https://", "http://")) else ""
+        citation_grounded = item.get("citation_grounded") is True
         title = _escape(item.get("page_title") or url or "Source")
         source_tag = "Official" if item.get("official_source") else "External"
         strength = str(item.get("strength") or "weak").capitalize()
         link = (
             f'<a href="{_escape(safe_url)}" target="_blank" rel="noopener noreferrer">{title}</a>'
-            if safe_url
+            if safe_url and citation_grounded
             else f"<strong>{title}</strong>"
+        )
+        citation_note = (
+            ""
+            if citation_grounded
+            else '<span class="muted">Citation not verified; run research again.</span>'
         )
         cards.append(
             '<li class="deep-source">'
             f'<div>{link}<span class="source-tags"><span>{source_tag}</span><span>{_escape(strength)}</span></span></div>'
             f'<p>{_escape(item.get("evidence") or "No excerpt available.")}</p>'
+            f'{citation_note}'
             '</li>'
         )
     return f'<ul class="deep-source-list">{"".join(cards)}</ul>' if cards else f'<p class="deep-empty">{_escape(empty_copy)}</p>'

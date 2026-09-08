@@ -7,27 +7,46 @@ from .schemas import EvidenceCategory, EvidenceFinding, EvidenceStrength
 
 
 SERVICENOW_RE = re.compile(
-    r"\b(?:service\s*now|now platform|service\s*now\s+(?:itsm|hrsd|csm|itom))\b",
+    r"\b(?:service[-\s]*now|now platform|service[-\s]*now\s+(?:itsm|hrsd|csm|itom))\b",
     re.IGNORECASE,
 )
 PARTNER_RE = re.compile(
-    r"\b(?:service\s*now\s+(?:elite\s+)?partner|partner\s+with\s+service\s*now|"
-    r"service\s*now\s+(?:consulting|consultant|implementation services|reseller|integrator)|"
-    r"implement\s+service\s*now\s+for\s+(?:our\s+)?clients?|help\s+(?:our\s+)?clients?.{0,40}service\s*now)\b",
+    r"\b(?:service[-\s]*now.{0,45}(?:partner|consulting|consultants?|implementation|migration|"
+    r"managed services|support (?:and|&) maintenance|reseller|integrator|services provider)|"
+    r"partner\s+with\s+service[-\s]*now|"
+    r"implement\s+service[-\s]*now\s+for\s+(?:our\s+)?(?:clients?|customers?)|"
+    r"(?:help|support|empower|enable|advise)\s+(?:our\s+)?"
+    r"(?:clients?|customers?|businesses|enterprises).{0,100}\b(?:using|with|on)\s+"
+    r"(?:service[-\s]*now|the now platform)|"
+    r"(?:service[-\s]*now|the now platform).{0,100}\b(?:for|to)\s+(?:our\s+)?"
+    r"(?:clients?|customers?|businesses|enterprises)|"
+    r"(?:service[-\s]*now\s+experts?|\d+\+?\s+service[-\s]*now implementations?))\b",
     re.IGNORECASE,
 )
 STRONG_CUSTOMER_RE = re.compile(
-    r"\b(?:we|our company|our organization|employees?|colleagues?|staff)\b.{0,100}"
-    r"\b(?:use|uses|using|deployed|implemented|migrated to|access|run|runs|rely on|powered by)\b.{0,100}"
-    r"\b(?:service\s*now|now platform)\b|"
-    r"\b(?:our|internal|enterprise)\s+service\s*now\s+(?:platform|instance|environment|portal|system)|"
-    r"\bservice\s*now\b.{0,90}\b(?:used internally|internal operations|our employees|our staff)\b",
+    r"\b(?:we|our company|our organization)\s+(?:(?:currently|actively)\s+|have\s+)?"
+    r"(?:use|uses|run|runs|rely on|deployed|implemented|migrated to)\s+(?:the\s+)?"
+    r"(?:service[-\s]*now|now platform)\b|"
+    r"\b(?:employees?|colleagues?|staff)\b.{0,70}\b(?:use|uses|access|login|log in|visit)\b.{0,70}"
+    r"(?:service[-\s]*now|[a-z0-9-]+\.service-now\.com)\b|"
+    r"\b(?:our|internal|enterprise)\s+service[-\s]*now\s+"
+    r"(?:platform|instance|environment|portal|system)\b|"
+    r"\bservice[-\s]*now\b.{0,90}\b(?:used internally|internal operations|our employees|our staff)\b|"
+    r"\b(?:login|log in|visit|access)\s+(?:to\s+)?https?://[a-z0-9.-]+\.service-now\.com\b",
+    re.IGNORECASE,
+)
+INTERNAL_OWNERSHIP_RE = re.compile(
+    r"\b(?:internally|internal operations|our (?:employees|colleagues|staff|service[-\s]*now\s+"
+    r"(?:platform|instance|environment|portal|system))|(?:employees?|colleagues?|staff).{0,80}"
+    r"(?:service[-\s]*now|[a-z0-9-]+\.service-now\.com)|within our (?:company|organization))\b",
     re.IGNORECASE,
 )
 MEDIUM_CUSTOMER_RE = re.compile(
-    r"\b(?:hiring|join our|seeking|looking for|responsible for|manage|maintain|administer|support)\b.{0,120}"
-    r"\bservice\s*now\s+(?:administrator|developer|platform|instance|environment|itsm|hrsd|csm|itom)\b|"
-    r"\bservice\s*now\s+(?:administrator|developer)\b.{0,120}\b(?:our|internal|enterprise)\b",
+    r"\b(?:hiring|join our|seeking|looking for|responsible for)\b.{0,120}"
+    r"\bservice[-\s]*now\s+(?:administrator|developer|platform|instance|environment|itsm|hrsd|csm|itom)\b|"
+    r"\b(?:manage|maintain|administer|support)\b.{0,80}\b(?:our|internal|enterprise)\b.{0,60}"
+    r"\bservice[-\s]*now\b|"
+    r"\bservice[-\s]*now\s+(?:administrator|developer)\b.{0,120}\b(?:our|internal|enterprise)\b",
     re.IGNORECASE,
 )
 
@@ -42,9 +61,14 @@ def classify_text(text: str) -> tuple[EvidenceCategory, EvidenceStrength, str]:
     normalized = " ".join(str(text or "").split())
     if not SERVICENOW_RE.search(normalized):
         return EvidenceCategory.IRRELEVANT, EvidenceStrength.WEAK, "irrelevant"
+    partner_signal = PARTNER_RE.search(normalized)
+    # Service-provider language wins unless the same excerpt explicitly says
+    # the company owns or uses ServiceNow for its own people or operations.
+    if partner_signal and not INTERNAL_OWNERSHIP_RE.search(normalized):
+        return EvidenceCategory.PARTNER_EVIDENCE, EvidenceStrength.STRONG, "partner_or_service_provider"
     if STRONG_CUSTOMER_RE.search(normalized):
         return EvidenceCategory.CUSTOMER_EVIDENCE, EvidenceStrength.STRONG, "explicit_internal_usage"
-    if PARTNER_RE.search(normalized):
+    if partner_signal:
         return EvidenceCategory.PARTNER_EVIDENCE, EvidenceStrength.STRONG, "partner_or_service_provider"
     if MEDIUM_CUSTOMER_RE.search(normalized):
         return EvidenceCategory.CUSTOMER_EVIDENCE, EvidenceStrength.MEDIUM, "internal_role_or_platform_management"
@@ -58,6 +82,7 @@ def evidence_snippets(
     page_title: str,
     official_domain: str,
     limit: int = 4,
+    citation_grounded: bool = False,
 ) -> list[EvidenceFinding]:
     compact = " ".join(str(text or "").split())
     findings: list[EvidenceFinding] = []
@@ -82,6 +107,7 @@ def evidence_snippets(
                 strength=strength,
                 category=category,
                 official_source=is_official_url(url, official_domain),
+                citation_grounded=citation_grounded,
             )
         )
         if len(findings) >= limit:
@@ -106,13 +132,11 @@ def normalize_model_finding(raw: dict[str, object], official_domain: str) -> Evi
             model_strength = EvidenceStrength.WEAK
         if model_category == EvidenceCategory.PARTNER_EVIDENCE:
             category, strength = model_category, model_strength
-        elif model_category == EvidenceCategory.CUSTOMER_EVIDENCE and model_strength != EvidenceStrength.WEAK:
-            category, strength = model_category, model_strength
         elif category == EvidenceCategory.IRRELEVANT:
             category, strength = EvidenceCategory.AMBIGUOUS, EvidenceStrength.WEAK
         evidence_type = str(raw.get("evidence_type") or evidence_type or "model_classified_reference")
     # Deterministic partner detection always wins over a model's customer label.
-    if PARTNER_RE.search(evidence) and not STRONG_CUSTOMER_RE.search(evidence):
+    if PARTNER_RE.search(evidence) and not INTERNAL_OWNERSHIP_RE.search(evidence):
         category = EvidenceCategory.PARTNER_EVIDENCE
         strength = EvidenceStrength.STRONG
         evidence_type = "partner_or_service_provider"
