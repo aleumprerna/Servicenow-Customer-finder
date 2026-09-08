@@ -149,16 +149,16 @@ At minimum, set:
 
 ```dotenv
 APOLLO_API_KEY=your_real_key
-LLM_PROVIDER=glm
-GLM_KEY=your_tokenrouter_key
-GLM_BASE_URL=https://api.tokenrouter.com/v1
-GLM_MODEL=z-ai/glm-5.3
+LLM_PROVIDER=gemini
+GEMINI_API_KEY=your_google_ai_studio_key
+GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta
+GEMINI_MODEL=gemini-3-flash-preview
 CHROME_CDP_URL=http://localhost:9222
 INPUT_CSV=companies.csv
 OUTPUT_CSV=companies_checked.csv
 ```
 
-`LLM_PROVIDER=glm` sends all active model calls to GLM 5.3 through TokenRouter. Keep `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL` in `.env`; they remain inactive until `LLM_PROVIDER=openai` is selected. TokenRouter GLM uses the existing bounded website crawler for research evidence and Chat Completions for reasoning because this model does not provide OpenAI's hosted web-search tool.
+`LLM_PROVIDER=gemini` sends all active model calls to Gemini 3 Flash Preview. Company resolution uses Gemini's Google Search grounding and URL context; deep research combines the existing bounded crawler with Gemini search and reasoning. Keep the GLM and OpenAI settings in `.env`; they remain inactive until their provider is selected.
 
 Do not commit `.env`. The optional `SERVICENOW_USERNAME` and `SERVICENOW_PASSWORD` values are reserved for a possible future login flow and are not read or logged by the current workflow. `HEADLESS` is also informational because an attached browser keeps its existing mode.
 

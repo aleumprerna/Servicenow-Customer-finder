@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from config import load_settings
+from services.gemini_client import GeminiClient
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +49,8 @@ def resolve_company_from_web(
 ) -> dict[str, Any]:
     """Search the web to resolve a person's current company from their LinkedIn profile.
 
-    Uses the configured LLM provider with a fallback to headline parsing. OpenAI
-    can use hosted web search; GLM receives the supplied profile context only.
+    Uses the configured LLM provider with a fallback to headline parsing.
+    Gemini and OpenAI use grounded web search; GLM uses supplied profile context.
     """
     settings = load_settings()
     provider_name = (provider or settings.llm_provider).casefold()
@@ -60,9 +61,6 @@ def resolve_company_from_web(
     # 1. Attempt resolution with the configured model if its API key is present.
     if key:
         try:
-            import openai
-
-            client = openai.OpenAI(api_key=key, base_url=selected_base_url)
             prompt = (
                 "You are an expert corporate researcher.\n"
                 "Your task is to identify the current company/employer of this person.\n"
@@ -71,11 +69,10 @@ def resolve_company_from_web(
                 f"Headline / Current Role Context: {headline}\n\n"
                 + (
                     "Search the web, including recent reliable sources, to determine the current employer.\n"
-                    if provider_name == "openai"
+                    if provider_name in {"openai", "gemini"}
                     else "Use only the supplied profile URL and headline context. Do not claim to have browsed the web.\n"
                 )
-                +
-                "Return ONLY a valid JSON object in the exact format:\n"
+                + "Return ONLY a valid JSON object in the exact format:\n"
                 "{\n"
                 '  "company_name": "Company Name",\n'
                 '  "confidence": "high|medium|low",\n'
@@ -84,7 +81,19 @@ def resolve_company_from_web(
                 "Do not include markdown code fences or any explanatory text outside the JSON."
             )
 
-            if provider_name == "openai":
+            if provider_name == "gemini":
+                result = GeminiClient(
+                    key,
+                    model=selected_model,
+                    base_url=selected_base_url,
+                    max_retries=settings.gemini_max_retries,
+                    retry_base_seconds=settings.gemini_retry_base_seconds,
+                ).generate(prompt, use_google_search=True, use_url_context=True)
+                raw_text = result.text
+            elif provider_name == "openai":
+                import openai
+
+                client = openai.OpenAI(api_key=key, base_url=selected_base_url)
                 response = client.responses.create(
                     model=selected_model,
                     tools=[{"type": "web_search_preview"}],
@@ -92,6 +101,9 @@ def resolve_company_from_web(
                 )
                 raw_text = getattr(response, "output_text", str(response)).strip()
             else:
+                import openai
+
+                client = openai.OpenAI(api_key=key, base_url=selected_base_url)
                 response = client.chat.completions.create(
                     model=selected_model,
                     messages=[{"role": "user", "content": prompt}],
@@ -111,7 +123,11 @@ def resolve_company_from_web(
                         "confidence": str(data.get("confidence") or "medium"),
                         "reason": str(data.get("reason") or "Resolved via web search"),
                         "source": (
-                            "openai_web_search" if provider_name == "openai" else "glm_profile_context"
+                            "openai_web_search"
+                            if provider_name == "openai"
+                            else "gemini_google_search"
+                            if provider_name == "gemini"
+                            else "glm_profile_context"
                         ),
                     }
         except Exception as exc:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+from services.gemini_client import GeminiResult
 from services.ai_company_resolver import (
     extract_company_from_headline,
     resolve_company_from_web,
@@ -86,6 +87,43 @@ def test_resolve_company_with_glm_chat_completions() -> None:
     assert result["source"] == "glm_profile_context"
 
 
+def test_resolve_company_with_gemini_grounded_search() -> None:
+    gemini = MagicMock()
+    gemini.generate.return_value = GeminiResult(
+        text=(
+            '{"company_name":"Harbour Energy","confidence":"high",'
+            '"reason":"Current employer confirmed by search."}'
+        ),
+        source_urls={"https://example.com/source"},
+    )
+
+    with patch("services.ai_company_resolver.GeminiClient", return_value=gemini) as client_class:
+        result = resolve_company_from_web(
+            person_name="Regitze Reeh",
+            linkedin_url="https://linkedin.com/in/regitze-reeh",
+            headline="Head of Corporate Affairs at Harbour Energy",
+            api_key="gemini-fake-key",
+            provider="gemini",
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            model="gemini-3-flash-preview",
+        )
+
+    client_class.assert_called_once_with(
+        "gemini-fake-key",
+        model="gemini-3-flash-preview",
+        base_url="https://generativelanguage.googleapis.com/v1beta",
+        max_retries=4,
+        retry_base_seconds=2.0,
+    )
+    gemini.generate.assert_called_once()
+    assert gemini.generate.call_args.kwargs == {
+        "use_google_search": True,
+        "use_url_context": True,
+    }
+    assert result["success"] is True
+    assert result["source"] == "gemini_google_search"
+
+
 def test_resolve_company_from_web_fallback_on_openai_error() -> None:
     with patch("openai.OpenAI", side_effect=Exception("API connection timeout")):
         result = resolve_company_from_web(
@@ -93,6 +131,7 @@ def test_resolve_company_from_web_fallback_on_openai_error() -> None:
             linkedin_url="https://linkedin.com/in/regitze-reeh",
             headline="Head of Corporate Affairs at Harbour Energy",
             api_key="sk-fake-key",
+            provider="openai",
         )
 
     assert result["success"] is True
@@ -107,6 +146,7 @@ def test_resolve_company_from_web_unresolved() -> None:
             linkedin_url="https://linkedin.com/in/janedoe",
             headline="Exploring new horizons",
             api_key="sk-fake-key",
+            provider="openai",
         )
 
     assert result["success"] is False

@@ -9,6 +9,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from openai import OpenAI
 
+from services.gemini_client import GeminiClient
+
 from .classifier import classify_evidence
 from .crawler import BoundedOfficialCrawler, UnsafeResearchTarget, normalize_domain
 from .evidence_extractor import deduplicate_findings, is_official_url, normalize_model_finding
@@ -163,6 +165,8 @@ class LLMResearchProvider:
         provider_name: str = "openai",
         supports_hosted_web_search: bool = True,
         timeout_seconds: float = 180.0,
+        max_retries: int = 4,
+        retry_base_seconds: float = 2.0,
     ) -> None:
         if not str(api_key or "").strip():
             raise ResearchConfigurationError(
@@ -171,12 +175,22 @@ class LLMResearchProvider:
         self.model = model
         self.provider_name = provider_name.casefold()
         self.supports_hosted_web_search = supports_hosted_web_search
-        self.client = OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=timeout_seconds,
-            max_retries=1,
-        )
+        if self.provider_name == "gemini":
+            self.client = GeminiClient(
+                api_key,
+                model=model,
+                base_url=base_url or "https://generativelanguage.googleapis.com/v1beta",
+                timeout_seconds=timeout_seconds,
+                max_retries=max_retries,
+                retry_base_seconds=retry_base_seconds,
+            )
+        else:
+            self.client = OpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                timeout=timeout_seconds,
+                max_retries=1,
+            )
 
     @property
     def provider_label(self) -> str:
@@ -217,9 +231,8 @@ class LLMResearchProvider:
         existing_context: dict[str, Any],
         official_only: bool,
     ) -> ProviderDiscovery:
-        # TokenRouter's GLM 5.3 endpoint is text-only and does not expose the
-        # OpenAI hosted web_search tool. The bounded crawler remains the source
-        # of truth in that mode, and GLM synthesizes those collected findings.
+        # TokenRouter's GLM endpoint is text-only and does not expose a hosted
+        # search tool. The bounded crawler remains the source of truth there.
         if not getattr(self, "supports_hosted_web_search", True):
             return ProviderDiscovery(findings=[], source_urls=set())
         scope = "Only use sources hosted on the official domain or its subdomains." if official_only else (
@@ -241,19 +254,24 @@ Do not invent URLs or evidence. Return an empty findings list when evidence is a
         if official_only:
             search_tool["filters"] = {"allowed_domains": [official_domain]}
         try:
-            response = self.client.responses.create(
-                model=self.model,
-                tools=[search_tool],
-                include=["web_search_call.action.sources"],
-                text=FINDINGS_FORMAT,
-                input=prompt,
-            )
-            payload = _json_object(response.output_text)
+            if getattr(self, "provider_name", "openai") == "gemini":
+                response = self.client.generate(prompt, use_google_search=True)
+                payload = _json_object(response.text)
+                source_urls = response.source_urls
+            else:
+                response = self.client.responses.create(
+                    model=self.model,
+                    tools=[search_tool],
+                    include=["web_search_call.action.sources"],
+                    text=FINDINGS_FORMAT,
+                    input=prompt,
+                )
+                payload = _json_object(response.output_text)
+                source_urls = _response_source_urls(response)
         except ResearchProviderError:
             raise
         except Exception as exc:
-            raise ResearchProviderError("The research provider request failed.") from exc
-        source_urls = _response_source_urls(response)
+            raise ResearchProviderError(f"The research provider request failed: {exc}") from exc
         return ProviderDiscovery(
             findings=self._findings(
                 payload,
@@ -276,7 +294,9 @@ Return JSON only: {{"status":"CONFIRMED_CUSTOMER|LIKELY_CUSTOMER|INCONCLUSIVE|NO
 Evidence: {json.dumps(evidence, ensure_ascii=False)[:28000]}
 """.strip()
         try:
-            if self.supports_hosted_web_search:
+            if self.provider_name == "gemini":
+                output_text = self.client.generate(prompt).text
+            elif self.supports_hosted_web_search:
                 response = self.client.responses.create(
                     model=self.model,
                     text=CLASSIFICATION_FORMAT,
@@ -353,7 +373,7 @@ class DeepResearchService:
         has_customer_signal = any(
             item.category == EvidenceCategory.CUSTOMER_EVIDENCE for item in findings
         )
-        if not has_customer_signal:
+        if not has_customer_signal and provider_failed is None:
             try:
                 external = self.provider.discover(
                     company_name=company,

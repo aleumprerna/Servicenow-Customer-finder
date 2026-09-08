@@ -92,18 +92,22 @@ def test_provider_failure_is_reported_when_no_crawl_evidence_exists() -> None:
 
     class Provider:
         model = "test-model"
+        calls = 0
 
         def discover(self, **_kwargs):
+            self.calls += 1
             raise ResearchProviderError("Search provider unavailable")
 
         def suggest_classification(self, **_kwargs):
             raise AssertionError("classification must not run without any evidence after provider failure")
 
+    provider = Provider()
     with pytest.raises(ResearchProviderError, match="Search provider unavailable"):
-        DeepResearchService(provider=Provider(), crawler=Crawler()).research(
+        DeepResearchService(provider=provider, crawler=Crawler()).research(
             company_name="Example Company",
             official_domain="example.com",
         )
+    assert provider.calls == 1
 
 
 def test_openai_discovery_is_official_domain_scoped_and_source_grounded() -> None:
@@ -258,7 +262,7 @@ def test_start_endpoint_returns_cached_result_without_adding_task(monkeypatch) -
     assert not tasks.tasks
 
 
-def test_start_endpoint_reports_missing_glm_configuration(monkeypatch) -> None:
+def test_start_endpoint_reports_missing_gemini_configuration(monkeypatch) -> None:
     class Database:
         def person(self, _person_id):
             return {"id": 10, "run_id": 3, "company_name": "Example", "company_domain": "example.com"}
@@ -270,7 +274,7 @@ def test_start_endpoint_reports_missing_glm_configuration(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard,
         "load_settings",
-        lambda: SimpleNamespace(llm_api_key=None, llm_provider="glm"),
+        lambda: SimpleNamespace(llm_api_key=None, llm_provider="gemini"),
     )
 
     response = dashboard.start_deep_research(
@@ -280,7 +284,7 @@ def test_start_endpoint_reports_missing_glm_configuration(monkeypatch) -> None:
 
     assert response.status_code == 503
     assert payload["success"] is False
-    assert "GLM_KEY" in payload["error"]
+    assert "GEMINI_API_KEY" in payload["error"]
 
 
 def test_result_ui_shows_deep_research_action_and_evidence() -> None:

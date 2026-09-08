@@ -37,7 +37,12 @@ class Settings(BaseModel):
     result_selectors: tuple[str, ...] = ()
     n8n_webhook_url: str | None = None
     app_base_url: str = "http://localhost:8000"
-    llm_provider: str = "glm"
+    llm_provider: str = "gemini"
+    gemini_api_key: str | None = None
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    gemini_model: str = "gemini-3-flash-preview"
+    gemini_max_retries: int = Field(default=4, ge=0, le=8)
+    gemini_retry_base_seconds: float = Field(default=2.0, gt=0, le=60)
     glm_api_key: str | None = None
     glm_base_url: str = "https://api.tokenrouter.com/v1"
     glm_model: str = "z-ai/glm-5.3"
@@ -61,25 +66,31 @@ class Settings(BaseModel):
     def validate_thresholds(self) -> "Settings":
         if self.review_threshold >= self.match_threshold:
             raise ValueError("REVIEW_THRESHOLD must be lower than MATCH_THRESHOLD")
-        if self.llm_provider not in {"glm", "openai"}:
-            raise ValueError("LLM_PROVIDER must be 'glm' or 'openai'")
+        if self.llm_provider not in {"gemini", "glm", "openai"}:
+            raise ValueError("LLM_PROVIDER must be 'gemini', 'glm', or 'openai'")
         return self
 
     @property
     def llm_api_key(self) -> str | None:
+        if self.llm_provider == "gemini":
+            return self.gemini_api_key
         return self.glm_api_key if self.llm_provider == "glm" else self.openai_api_key
 
     @property
     def llm_base_url(self) -> str:
+        if self.llm_provider == "gemini":
+            return self.gemini_base_url
         return self.glm_base_url if self.llm_provider == "glm" else self.openai_base_url
 
     @property
     def llm_model(self) -> str:
+        if self.llm_provider == "gemini":
+            return self.gemini_model
         return self.glm_model if self.llm_provider == "glm" else self.openai_model
 
     @property
     def llm_supports_hosted_web_search(self) -> bool:
-        return self.llm_provider == "openai"
+        return self.llm_provider in {"gemini", "openai"}
 
 
 def _optional(name: str) -> str | None:
@@ -124,7 +135,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         value = file_values.get(name)
         return str(value).strip() if value is not None else os.getenv(name, default).strip()
 
-    llm_provider = dynamic_value("LLM_PROVIDER", "glm").casefold()
+    llm_provider = dynamic_value("LLM_PROVIDER", "gemini").casefold()
     data: dict[str, Any] = {
         "apollo_api_key": os.getenv("APOLLO_API_KEY", "").strip(),
         "apollo_base_url": os.getenv("APOLLO_BASE_URL", "https://api.apollo.io/api/v1").strip(),
@@ -147,6 +158,18 @@ def load_settings(env_file: Path | None = None) -> Settings:
         "n8n_webhook_url": dynamic_value("N8N_WEBHOOK_URL") or None,
         "app_base_url": dynamic_value("APP_BASE_URL", "http://localhost:8000"),
         "llm_provider": llm_provider,
+        "gemini_api_key": (
+            dynamic_value("GEMINI_API_KEY")
+            or dynamic_value("GEMINI_KEY")
+            or _optional("GEMINI_API_KEY")
+            or _optional("GEMINI_KEY")
+        ),
+        "gemini_base_url": dynamic_value(
+            "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"
+        ),
+        "gemini_model": dynamic_value("GEMINI_MODEL", "gemini-3-flash-preview"),
+        "gemini_max_retries": dynamic_value("GEMINI_MAX_RETRIES", "4"),
+        "gemini_retry_base_seconds": dynamic_value("GEMINI_RETRY_BASE_SECONDS", "2"),
         "glm_api_key": dynamic_value("GLM_KEY") or _optional("GLM_KEY"),
         "glm_base_url": dynamic_value("GLM_BASE_URL", "https://api.tokenrouter.com/v1"),
         "glm_model": dynamic_value("GLM_MODEL", "z-ai/glm-5.3"),
