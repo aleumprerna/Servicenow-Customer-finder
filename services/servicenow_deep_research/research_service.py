@@ -12,6 +12,7 @@ from openai import OpenAI
 from services.gemini_client import GeminiClient
 
 from .classifier import classify_evidence
+from .customer_page import ServiceNowCustomerPageVerifier
 from .crawler import BoundedOfficialCrawler, UnsafeResearchTarget, normalize_domain
 from .evidence_extractor import deduplicate_findings, is_official_url, normalize_model_finding
 from .schemas import ClassificationSuggestion, DeepResearchResult, EvidenceCategory, EvidenceFinding
@@ -255,7 +256,9 @@ class LLMResearchProvider:
         if not getattr(self, "supports_hosted_web_search", True):
             return ProviderDiscovery(findings=[], source_urls=set())
         scope = "Only use sources hosted on the official domain or its subdomains." if official_only else (
-            "Use reliable third-party sources. Exclude social forums, aggregators, and unsourced directories."
+            "Use reliable third-party sources. Specifically look for an official ServiceNow Customer "
+            "Story under servicenow.com/*/customers/{company-slug}.html. Exclude social forums, "
+            "aggregators, and unsourced directories."
         )
         prompt = f"""
 Research whether {company_name} is an end customer that internally uses ServiceNow.
@@ -338,9 +341,16 @@ Evidence: {json.dumps(evidence, ensure_ascii=False)[:28000]}
 
 
 class DeepResearchService:
-    def __init__(self, *, provider: LLMResearchProvider, crawler: BoundedOfficialCrawler) -> None:
+    def __init__(
+        self,
+        *,
+        provider: LLMResearchProvider,
+        crawler: BoundedOfficialCrawler,
+        customer_page_verifier: ServiceNowCustomerPageVerifier | None = None,
+    ) -> None:
         self.provider = provider
         self.crawler = crawler
+        self.customer_page_verifier = customer_page_verifier
 
     def research(
         self,
@@ -366,6 +376,7 @@ class DeepResearchService:
 
         context = dict(existing_context or {})
         findings = list(crawl_report.findings)
+        discovered_source_urls: set[str] = set()
         sources_checked = crawl_report.sources_checked
         LOGGER.info("Deep research official crawl finished for %s (%s pages)", domain, sources_checked)
         if crawl_report.discovered_urls:
@@ -378,12 +389,13 @@ class DeepResearchService:
         provider_failed: ResearchProviderError | None = None
         try:
             official_discovery = self.provider.discover(
-                    company_name=company,
-                    official_domain=domain,
-                    existing_context=context,
-                    official_only=True,
-                )
+                company_name=company,
+                official_domain=domain,
+                existing_context=context,
+                official_only=True,
+            )
             findings.extend(official_discovery.findings)
+            discovered_source_urls.update(official_discovery.source_urls)
             sources_checked += len(official_discovery.source_urls)
         except ResearchProviderError as exc:
             provider_failed = exc
@@ -403,14 +415,39 @@ class DeepResearchService:
                     official_only=False,
                 )
                 sources_checked += len(external.source_urls)
+                discovered_source_urls.update(external.source_urls)
                 findings.extend(external.findings)
             except ResearchProviderError as exc:
                 provider_failed = provider_failed or exc
                 LOGGER.warning("External research failed for %s: %s", domain, exc)
 
         findings = deduplicate_findings(findings)
-        if provider_failed and not findings:
+        customer_page_check = None
+        if self.customer_page_verifier is not None:
+            customer_page_check = self.customer_page_verifier.check(company, discovered_source_urls)
+            sources_checked += len(customer_page_check.checked_urls)
+            if customer_page_check.found is True:
+                findings.append(
+                    EvidenceFinding(
+                        url=customer_page_check.url,
+                        page_title=f"{company} – ServiceNow customer story",
+                        evidence=(
+                            f"ServiceNow publishes an official customer story for {company}."
+                        ),
+                        evidence_type="official_servicenow_customer_story",
+                        strength="strong",
+                        category="CUSTOMER_EVIDENCE",
+                        official_source=False,
+                        citation_grounded=True,
+                    )
+                )
+                findings = deduplicate_findings(findings)
+
+        if provider_failed and not findings and (
+            customer_page_check is None or customer_page_check.found is None
+        ):
             raise provider_failed
+
         suggestion = self.provider.suggest_classification(
             company_name=company,
             official_domain=domain,
@@ -428,6 +465,13 @@ class DeepResearchService:
             ),
             suggestion=suggestion,
         )
+        if customer_page_check is not None:
+            result = result.model_copy(
+                update={
+                    "servicenow_customer_page_found": customer_page_check.found,
+                    "servicenow_customer_page_url": customer_page_check.url,
+                }
+            )
         LOGGER.info(
             "Deep research completed for %s: %s (%s%%, %s relevant sources)",
             domain,

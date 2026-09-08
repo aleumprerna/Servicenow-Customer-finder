@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from config import load_settings
 from services.country_normalizer import CountryNormalizationError, normalize_country
 from services.gemini_client import GeminiClient
+from services.company_matcher import company_match_score
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,105 @@ def extract_company_from_headline(headline: str) -> str:
             return candidate
 
     return ""
+
+
+def resolve_company_headquarters(
+    company_name: str,
+    api_key: str | None = None,
+    *,
+    company_domain: str = "",
+    base_url: str | None = None,
+    model: str | None = None,
+    provider: str | None = None,
+) -> dict[str, Any]:
+    """Resolve headquarters for an already-confirmed company without changing its identity."""
+
+    settings = load_settings()
+    provider_name = (provider or settings.llm_provider).casefold()
+    key = api_key or settings.llm_api_key
+    selected_model = model or settings.llm_model
+    selected_base_url = base_url or settings.llm_base_url
+    company = " ".join(str(company_name or "").split())
+    if not company:
+        return {"success": False, "error": "A company name is required."}
+    if not key or provider_name not in {"gemini", "openai"}:
+        return {
+            "success": False,
+            "error": "A web-search-capable Gemini or OpenAI provider is required.",
+        }
+
+    prompt = f"""
+Research the headquarters of exactly this confirmed company: {company}
+Known domain, if any: {company_domain or "not provided"}
+
+Do not replace the company with a similarly named business, parent, successor, or acquirer.
+If the company was acquired, renamed, or is no longer active, return the headquarters of the
+named company while it operated and separately mention its current status/successor. Headquarters
+means the corporate headquarters, not the employee's work location or a branch office.
+Use reliable web sources, preferring the company's official site, filings, investor material, or
+the verified company LinkedIn page. Return at least one exact supporting URL.
+
+Return JSON only:
+{{"company_name":"{company}","headquarters":"City and state/region, without country",
+"country":"Full country name","country_code":"ISO 3166-1 alpha-2 code",
+"company_domain":"company.example","source_urls":["https://..."],
+"company_status":"active|acquired|renamed|inactive","successor":"",
+"confidence":"high|medium|low","reason":"Brief evidence-based explanation"}}
+""".strip()
+    try:
+        if provider_name == "gemini":
+            response = GeminiClient(
+                key,
+                model=selected_model,
+                base_url=selected_base_url,
+                max_retries=settings.gemini_max_retries,
+                retry_base_seconds=settings.gemini_retry_base_seconds,
+            ).generate(prompt, use_google_search=True, use_url_context=True)
+            raw_text = response.text
+            source_urls = sorted(response.source_urls)
+        else:
+            import openai
+
+            response = openai.OpenAI(api_key=key, base_url=selected_base_url).responses.create(
+                model=selected_model,
+                tools=[{"type": "web_search_preview"}],
+                input=prompt,
+            )
+            raw_text = getattr(response, "output_text", str(response)).strip()
+            source_urls = []
+        match = re.search(r"\{.*\}", raw_text, re.DOTALL)
+        if not match:
+            raise ValueError("AI returned no JSON object")
+        data = json.loads(match.group(0))
+        returned_company = str(data.get("company_name") or "").strip()
+        if not returned_company or company_match_score(company, returned_company) < 85:
+            raise ValueError("AI returned headquarters for a different company")
+        headquarters = " ".join(str(data.get("headquarters") or "").split())
+        country = " ".join(str(data.get("country") or "").split())
+        country_code = str(data.get("country_code") or "").strip().upper()
+        country_code = normalize_country(country_code or country)
+        source_urls = list(
+            dict.fromkeys([*source_urls, *_valid_source_urls(data.get("source_urls"))])
+        )
+        if not headquarters or not country or not source_urls:
+            raise ValueError("AI could not ground the headquarters and country")
+        return {
+            "success": True,
+            "company_name": company,
+            "headquarters": headquarters,
+            "country": country,
+            "country_code": country_code,
+            "company_domain": str(data.get("company_domain") or company_domain).strip(),
+            "company_status": str(data.get("company_status") or "").strip(),
+            "successor": str(data.get("successor") or "").strip(),
+            "confidence": str(data.get("confidence") or "medium"),
+            "reason": str(data.get("reason") or "Headquarters verified by web search"),
+            "source_urls": source_urls,
+            "source": f"{provider_name}_headquarters_search",
+        }
+    except Exception as exc:
+        logger.warning("%s headquarters resolution failed for %s: %s", provider_name.upper(), company, exc)
+        return {"success": False, "error": str(exc), "company_name": company}
 
 
 def resolve_company_from_web(

@@ -16,6 +16,7 @@ from clients.apollo import ApolloClient, ApolloError
 from config import Settings, load_settings
 from models.company import CheckStatus, CompanyRecord
 from services.country_normalizer import CountryNormalizationError, country_name, normalize_country
+from services.ai_company_resolver import resolve_company_headquarters
 from services.csv_service import CSVService
 from utils.logger import configure_logging
 
@@ -120,10 +121,40 @@ async def enrich_indices(
             continue
 
         LOGGER.info("[%d/%d] Enriching %s", position, len(indices), record.company_name)
+        enrichment_status = CheckStatus.APOLLO_SUCCESS
         try:
-            headquarters, country, country_code, apollo_name = await enrich_or_override(
-                record, apollo
-            )
+            try:
+                headquarters, country, country_code, apollo_name = await enrich_or_override(
+                    record, apollo
+                )
+            except ApolloError as apollo_exc:
+                LOGGER.warning(
+                    "Apollo enrichment failed for %s; trying grounded AI headquarters lookup: %s",
+                    record.company_name,
+                    clean_error(apollo_exc),
+                )
+                ai_result = await asyncio.to_thread(
+                    resolve_company_headquarters,
+                    record.company_name,
+                    settings.llm_api_key,
+                    company_domain=record.domain,
+                    base_url=settings.llm_base_url,
+                    model=settings.llm_model,
+                    provider=settings.llm_provider,
+                )
+                if not ai_result.get("success"):
+                    raise apollo_exc
+                headquarters = str(ai_result["headquarters"])
+                country = str(ai_result["country"])
+                country_code = str(ai_result["country_code"])
+                apollo_name = ""
+                enrichment_status = CheckStatus.AI_SUCCESS
+                LOGGER.info(
+                    "AI headquarters fallback: %s, %s (%s)",
+                    headquarters,
+                    country,
+                    country_code,
+                )
             csv_service.update(
                 index,
                 headquarters=headquarters,
@@ -134,7 +165,7 @@ async def enrich_indices(
                 servicenow_matched_name="",
                 servicenow_screenshot="",
                 match_score="",
-                check_status=CheckStatus.APOLLO_SUCCESS,
+                check_status=enrichment_status,
                 error_message="",
                 checked_at="",
             )

@@ -90,6 +90,8 @@ class WorkflowDatabase:
                     relevant_sources INTEGER NOT NULL DEFAULT 0,
                     research_depth TEXT NOT NULL DEFAULT 'deep',
                     model_provider TEXT NOT NULL DEFAULT '',
+                    servicenow_customer_page_found INTEGER NOT NULL DEFAULT -1,
+                    servicenow_customer_page_url TEXT NOT NULL DEFAULT '',
                     started_at TEXT NOT NULL DEFAULT '',
                     researched_at TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL DEFAULT '',
@@ -103,6 +105,14 @@ class WorkflowDatabase:
             self._ensure_column(conn, "people", "company_domain", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "people", "company_linkedin_url", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "company_checks", "screenshot_path", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(
+                conn, "deep_research_results", "servicenow_customer_page_found",
+                "INTEGER NOT NULL DEFAULT -1",
+            )
+            self._ensure_column(
+                conn, "deep_research_results", "servicenow_customer_page_url",
+                "TEXT NOT NULL DEFAULT ''",
+            )
             stale_cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
             conn.execute(
                 """UPDATE deep_research_results
@@ -290,6 +300,8 @@ class WorkflowDatabase:
                    d.relevant_sources AS dr_relevant_sources,
                    d.research_depth AS dr_research_depth,
                    d.model_provider AS dr_model_provider,
+                   d.servicenow_customer_page_found AS dr_servicenow_customer_page_found,
+                   d.servicenow_customer_page_url AS dr_servicenow_customer_page_url,
                    d.started_at AS dr_started_at,
                    d.researched_at AS dr_researched_at,
                    d.last_error AS dr_last_error
@@ -371,6 +383,8 @@ class WorkflowDatabase:
                     request_status = 'running',
                     research_depth = excluded.research_depth,
                     model_provider = excluded.model_provider,
+                    servicenow_customer_page_found = -1,
+                    servicenow_customer_page_url = '',
                     started_at = excluded.started_at,
                     updated_at = excluded.updated_at,
                     last_error = ''
@@ -396,7 +410,9 @@ class WorkflowDatabase:
                     request_status = 'completed', classification_status = ?, confidence = ?,
                     summary = ?, customer_evidence = ?, partner_evidence = ?,
                     ambiguous_evidence = ?, sources_checked = ?, relevant_sources = ?,
-                    research_depth = ?, model_provider = ?, researched_at = ?,
+                    research_depth = ?, model_provider = ?,
+                    servicenow_customer_page_found = ?, servicenow_customer_page_url = ?,
+                    researched_at = ?,
                     updated_at = ?, last_error = ''
                 WHERE person_id = ?""",
                 (
@@ -410,6 +426,12 @@ class WorkflowDatabase:
                     int(values.get("relevant_sources") or 0),
                     str(values.get("research_depth") or "deep"),
                     str(values.get("model_provider") or ""),
+                    (
+                        -1
+                        if values.get("servicenow_customer_page_found") is None
+                        else int(bool(values.get("servicenow_customer_page_found")))
+                    ),
+                    str(values.get("servicenow_customer_page_url") or ""),
                     str(values.get("researched_at") or timestamp),
                     timestamp,
                     person_id,

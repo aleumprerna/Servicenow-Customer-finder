@@ -8,6 +8,7 @@ from .research_service import (
     ResearchConfigurationError,
 )
 from .schemas import DeepResearchResult, EvidenceFinding, ResearchClassification
+from .customer_page import CustomerPageCheck, ServiceNowCustomerPageVerifier
 
 __all__ = [
     "DeepResearchError",
@@ -18,4 +19,6 @@ __all__ = [
     "OpenAIResearchProvider",
     "ResearchClassification",
     "ResearchConfigurationError",
+    "CustomerPageCheck",
+    "ServiceNowCustomerPageVerifier",
 ]

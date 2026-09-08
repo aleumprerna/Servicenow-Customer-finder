@@ -34,7 +34,11 @@ from config import PROJECT_ROOT, load_settings
 
 from services.ai_company_resolver import resolve_company_from_web
 
-from services.servicenow_deep_research import DeepResearchService, LLMResearchProvider
+from services.servicenow_deep_research import (
+    DeepResearchService,
+    LLMResearchProvider,
+    ServiceNowCustomerPageVerifier,
+)
 
 from services.servicenow_deep_research.crawler import BoundedOfficialCrawler
 
@@ -72,7 +76,7 @@ app = FastAPI(title="ServiceNow Partner Workflow", docs_url=None, redoc_url=None
 
 
 
-ENRICHED_CHECK_STATUSES = {"apollo_success", "searching", "completed", "manual_review", "error"}
+ENRICHED_CHECK_STATUSES = {"apollo_success", "ai_success", "searching", "completed", "manual_review", "error"}
 
 ENRICHMENT_TERMINAL_STATUSES = ENRICHED_CHECK_STATUSES | {"apollo_failed"}
 
@@ -792,6 +796,7 @@ def _automation_table(rows: list[dict[str, Any]]) -> str:
     body: list[str] = []
     status_labels = {
         "apollo_success": ("Ready to run", "info"),
+        "ai_success": ("Ready to run", "info"),
         "completed": ("Completed", "success"),
         "manual_review": ("Manual review", "warning"),
         "error": ("Error", "danger"),
@@ -3143,6 +3148,16 @@ def _deep_research_cell(row: dict[str, Any]) -> str:
         return f'<div class="deep-research-cell">{button}{progress}{error_html}</div>'
 
     researched_at = str(row.get("dr_researched_at") or "").replace("T", " ").replace("+00:00", " UTC")
+    customer_page_status = row.get("dr_servicenow_customer_page_found")
+    customer_page_found = customer_page_status == 1
+    customer_page_url = str(row.get("dr_servicenow_customer_page_url") or "")
+    customer_page_value = "Yes" if customer_page_found else "No" if customer_page_status == 0 else "Check unavailable"
+    customer_page_html = (
+        f'<a href="{_escape(customer_page_url)}" target="_blank" rel="noopener noreferrer">'
+        'Yes — open official story</a>'
+        if customer_page_found and customer_page_url.startswith("https://")
+        else customer_page_value
+    )
     customer_sources = _deep_research_evidence_list(
         row.get("dr_customer_evidence"), "No end-customer evidence was retained."
     )
@@ -3164,6 +3179,7 @@ def _deep_research_cell(row: dict[str, Any]) -> str:
             <div><dt>Sources checked</dt><dd>{int(row.get('dr_sources_checked') or 0)}</dd></div>
             <div><dt>Relevant sources</dt><dd>{int(row.get('dr_relevant_sources') or 0)}</dd></div>
             <div><dt>Official domain</dt><dd>{_escape(row.get('company_domain') or 'Not available')}</dd></div>
+            <div><dt>ServiceNow customer page</dt><dd>{customer_page_html}</dd></div>
             <div><dt>Last researched</dt><dd>{_escape(researched_at)}</dd></div>
           </dl>
           <section><h4>Customer evidence</h4>{customer_sources}</section>
@@ -3189,9 +3205,23 @@ def _simplified_results_table(rows: list[dict[str, Any]]) -> str:
         )
         relationship = _relationship(row, evidence)
         relationship_lower = relationship.casefold()
-        customer_raw = str(row.get("servicenow_customer") or "").casefold()
-        customer_label = "Verified customer" if customer_raw == "yes" else "Not verified" if customer_raw == "no" else "Needs review" if customer_raw == "unknown" else "Pending"
+        portal_customer_raw = str(row.get("servicenow_customer") or "").casefold()
+        story_check = row.get("dr_servicenow_customer_page_found")
+        customer_raw = (
+            "yes"
+            if portal_customer_raw == "yes" or story_check == 1
+            else "no"
+            if portal_customer_raw == "no" or story_check == 0
+            else portal_customer_raw
+        )
+        customer_label = "Yes" if customer_raw == "yes" else "No" if customer_raw == "no" else "Needs review" if customer_raw == "unknown" else "Pending"
         customer_tone = "success" if customer_raw == "yes" else "warning" if customer_raw == "unknown" else "neutral"
+        story_url = str(row.get("dr_servicenow_customer_page_url") or "")
+        customer_story_link = (
+            f'<small><a href="{_escape(story_url)}" target="_blank" rel="noopener noreferrer">View official page</a></small>'
+            if story_check == 1 and story_url.startswith("https://")
+            else ""
+        )
         partner_label = "Partner" if "partner" in relationship_lower else "—"
         opportunity_label = "Qualified" if _relationship_tone(relationship) == "positive" else "—"
         person_name = _escape(row.get("person_name")) or "Unnamed contact"
@@ -3208,7 +3238,7 @@ def _simplified_results_table(rows: list[dict[str, Any]]) -> str:
             <tr data-search="{person_name} {headline} {company} {location} {customer_label} {partner_label} {opportunity_label}">
               <td><div class="contact-cell"><span class="contact-avatar" aria-hidden="true">{_avatar_initials(str(row.get('person_name') or ''))}</span><span><strong>{_table_person_link(row)}</strong><small>{headline}</small></span></div></td>
               <td><strong>{company}</strong><small>{location}</small></td>
-              <td>{_status_pill(customer_label, customer_tone)}</td>
+              <td>{_status_pill(customer_label, customer_tone)}{customer_story_link}</td>
               <td>{_status_pill(partner_label, 'info') if partner_label != '—' else '<span class="no-action">—</span>'}</td>
               <td>{_status_pill(opportunity_label, 'success') if opportunity_label != '—' else '<span class="no-action">—</span>'}</td>
               <td>{_deep_research_cell(row)}</td>
@@ -3220,7 +3250,7 @@ def _simplified_results_table(rows: list[dict[str, Any]]) -> str:
     return f"""
       <div class="table-wrap">
         <table class="review-table results-table">
-          <thead><tr><th>Contact</th><th>Company</th><th>Customer status</th><th>Partner</th><th>Opportunity</th><th>Deep Research</th><th><span class="sr-only">Action</span></th></tr></thead>
+          <thead><tr><th>Contact</th><th>Company</th><th>ServiceNow user</th><th>Partner</th><th>Opportunity</th><th>Deep Research</th><th><span class="sr-only">Action</span></th></tr></thead>
           <tbody>{''.join(body)}</tbody>
         </table>
       </div>"""
@@ -4115,7 +4145,14 @@ def _run_deep_research_task(database: WorkflowDatabase, person_id: int, settings
             max_content_chars=settings.deep_research_max_content_chars,
             max_elapsed_seconds=min(60.0, settings.deep_research_request_timeout_seconds),
         )
-        result = DeepResearchService(provider=provider, crawler=crawler).research(
+        customer_page_verifier = ServiceNowCustomerPageVerifier(
+            timeout_seconds=min(20.0, settings.deep_research_page_timeout_seconds)
+        )
+        result = DeepResearchService(
+            provider=provider,
+            crawler=crawler,
+            customer_page_verifier=customer_page_verifier,
+        ).research(
             company_name=str(person.get("company_name") or ""),
             official_domain=str(person.get("company_domain") or ""),
             existing_context=context,

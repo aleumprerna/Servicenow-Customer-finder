@@ -81,6 +81,8 @@ class DeepResearchResult(BaseModel):
     relevant_sources: int = Field(default=0, ge=0)
     research_depth: str = "deep"
     model_provider: str = "llm+rules"
+    servicenow_customer_page_found: bool | None = None
+    servicenow_customer_page_url: str = ""
     researched_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
     )
@@ -98,5 +100,7 @@ class DeepResearchResult(BaseModel):
             "relevant_sources": int(payload["relevant_sources"]),
             "research_depth": payload["research_depth"],
             "model_provider": payload["model_provider"],
+            "servicenow_customer_page_found": payload["servicenow_customer_page_found"],
+            "servicenow_customer_page_url": payload["servicenow_customer_page_url"],
             "researched_at": payload["researched_at"],
         }

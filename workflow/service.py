@@ -178,7 +178,7 @@ def build_automation_checkpoint(
         for row in database.report_rows(run_id)
         if str(row.get("country_code") or "").strip()
         and str(row.get("check_status") or "").casefold()
-        in {"apollo_success", "searching", "completed", "manual_review", "error"}
+        in {"apollo_success", "ai_success", "searching", "completed", "manual_review", "error"}
     ]
     run_dir = RUNS_DIR / str(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -371,7 +371,7 @@ def run_enrichment(database: WorkflowDatabase, run_id: int) -> None:
             report_rows = database.report_rows(run_id)
             already_enriched = any(
                 str(row.get("check_status") or "").casefold()
-                in {"apollo_success", "searching", "completed", "manual_review", "error"}
+                in {"apollo_success", "ai_success", "searching", "completed", "manual_review", "error"}
                 for row in report_rows
             )
             database.update_run(
@@ -398,7 +398,7 @@ def run_enrichment(database: WorkflowDatabase, run_id: int) -> None:
         report_rows = database.report_rows(run_id)
         enriched_count = sum(
             str(row.get("check_status") or "").casefold()
-            in {"apollo_success", "searching", "completed", "manual_review", "error"}
+            in {"apollo_success", "ai_success", "searching", "completed", "manual_review", "error"}
             for row in report_rows
         )
         pending_enrichment = sum(

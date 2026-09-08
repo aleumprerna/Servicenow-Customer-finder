@@ -15,6 +15,10 @@ from services.servicenow_deep_research.crawler import (
     normalize_domain,
     validate_public_domain,
 )
+from services.servicenow_deep_research.customer_page import (
+    ServiceNowCustomerPageVerifier,
+    customer_story_slugs,
+)
 from services.servicenow_deep_research.evidence_extractor import (
     evidence_snippets,
     normalize_model_finding,
@@ -119,6 +123,55 @@ def test_no_evidence_returns_no_official_evidence_without_guessing() -> None:
     assert result.relevant_sources == 0
 
 
+def test_customer_story_slug_variants_cover_legal_and_brand_names() -> None:
+    assert customer_story_slugs("SKF India Ltd.") == ["skf-india-ltd", "skf-india", "skf"]
+    assert customer_story_slugs("MOL Group") == ["mol-group", "mol"]
+
+
+def test_customer_page_verifier_requires_official_story_content() -> None:
+    class Response:
+        status_code = 200
+        url = "https://www.servicenow.com/in/customers/skf.html"
+        text = "<title>SKF – ServiceNow – Customer Story</title><h2>Customer Details</h2><p>Customer SKF</p>"
+
+    class Session:
+        def get(self, *_args, **_kwargs):
+            return Response()
+
+    result = ServiceNowCustomerPageVerifier(session=Session()).check("SKF India Ltd.")
+
+    assert result.found is True
+    assert result.url == Response.url
+
+
+def test_customer_page_verifier_rejects_generic_servicenow_page() -> None:
+    class Response:
+        status_code = 200
+        url = "https://www.servicenow.com/in/customers.html"
+        text = "<title>Customer Stories</title><p>Search all stories</p>"
+
+    class Session:
+        def get(self, *_args, **_kwargs):
+            return Response()
+
+    result = ServiceNowCustomerPageVerifier(session=Session()).check("Unknown Company")
+
+    assert result.found is False
+    assert result.url == ""
+
+
+def test_customer_page_verifier_does_not_report_no_when_network_is_unavailable() -> None:
+    import requests
+
+    class Session:
+        def get(self, *_args, **_kwargs):
+            raise requests.ConnectionError("offline")
+
+    result = ServiceNowCustomerPageVerifier(session=Session()).check("Example Company")
+
+    assert result.found is None
+
+
 def test_private_and_unsupported_targets_are_rejected() -> None:
     with pytest.raises(UnsafeResearchTarget):
         validate_public_domain("127.0.0.1")
@@ -159,6 +212,41 @@ def test_provider_failure_is_reported_when_no_crawl_evidence_exists() -> None:
             official_domain="example.com",
         )
     assert provider.calls == 1
+
+
+def test_verified_servicenow_story_is_added_to_research_result() -> None:
+    class Crawler:
+        def crawl(self, _domain):
+            return CrawlReport(findings=[], sources_checked=1, discovered_urls=[])
+
+    class Provider:
+        model = "test-model"
+        provider_label = "test:test-model"
+
+        def discover(self, **_kwargs):
+            return SimpleNamespace(findings=[], source_urls=set())
+
+        def suggest_classification(self, **_kwargs):
+            return None
+
+    class Verifier:
+        def check(self, _company_name, _discovered_urls):
+            return SimpleNamespace(
+                found=True,
+                url="https://www.servicenow.com/in/customers/example.html",
+                checked_urls=("https://www.servicenow.com/in/customers/example.html",),
+            )
+
+    result = DeepResearchService(
+        provider=Provider(),
+        crawler=Crawler(),
+        customer_page_verifier=Verifier(),
+    ).research(company_name="Example Company", official_domain="example.com")
+
+    assert result.servicenow_customer_page_found is True
+    assert result.servicenow_customer_page_url.endswith("/customers/example.html")
+    assert result.customer_evidence[0].citation_grounded is True
+    assert result.customer_evidence[0].evidence_type == "official_servicenow_customer_story"
 
 
 def test_openai_discovery_is_official_domain_scoped_and_source_grounded() -> None:
@@ -322,6 +410,43 @@ def test_research_result_is_persisted_and_reused_from_cache(tmp_path) -> None:
         domain="renamed.example.com",
     )
     assert database.deep_research(person_id) is None
+
+
+def test_customer_story_result_is_persisted_and_rendered_as_servicenow_yes(tmp_path) -> None:
+    database = WorkflowDatabase(tmp_path / "workflow.db")
+    database.initialize()
+    run_id = database.create_run(
+        "customers.csv",
+        [{"person_name": "Ada", "linkedin_url": "https://linkedin.com/in/ada"}],
+    )
+    person_id = database.people_for_run(run_id)[0]["id"]
+    database.update_person_resolution(
+        person_id, company_name="Example", status="verified", domain="example.com"
+    )
+    database.claim_deep_research(
+        person_id=person_id,
+        run_id=run_id,
+        company_name="Example",
+        official_domain="example.com",
+    )
+    values = _result_for("No relevant product information.").as_storage_values()
+    values.update(
+        {
+            "servicenow_customer_page_found": True,
+            "servicenow_customer_page_url": "https://www.servicenow.com/in/customers/example.html",
+        }
+    )
+    database.complete_deep_research(person_id, values)
+
+    stored = database.deep_research(person_id)
+    row = database.report_rows(run_id)[0]
+    html = dashboard._simplified_results_table([row])
+
+    assert stored["servicenow_customer_page_found"] == 1
+    assert row["dr_servicenow_customer_page_found"] == 1
+    assert "ServiceNow user" in html
+    assert ">Yes<" in html
+    assert "View official page" in html
 
 
 def test_start_endpoint_returns_cached_result_without_adding_task(monkeypatch) -> None:

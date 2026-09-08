@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 from services.gemini_client import GeminiResult
 from services.ai_company_resolver import (
     extract_company_from_headline,
+    resolve_company_headquarters,
     resolve_company_from_web,
 )
 
@@ -188,6 +189,56 @@ def test_suggest_company_accepts_source_urls_returned_inside_gemini_json() -> No
     assert result["company_name"] == "SKF India Ltd."
     assert result["headquarters"] == "Pune, Maharashtra"
     assert result["source_urls"] == ["https://www.skf.com/in/about-skf-india"]
+
+
+def test_headquarters_lookup_keeps_confirmed_legacy_company_identity() -> None:
+    gemini = MagicMock()
+    gemini.generate.return_value = GeminiResult(
+        text=(
+            '{"company_name":"Maersk Oil","headquarters":"Copenhagen",'
+            '"country":"Denmark","country_code":"DK","company_domain":"maerskoil.com",'
+            '"source_urls":["https://investor.maersk.com/maersk-oil"],'
+            '"company_status":"acquired","successor":"TotalEnergies",'
+            '"confidence":"high","reason":"Official investor material."}'
+        ),
+        source_urls={"https://investor.maersk.com/maersk-oil"},
+    )
+
+    with patch("services.ai_company_resolver.GeminiClient", return_value=gemini):
+        result = resolve_company_headquarters(
+            "Maersk Oil",
+            api_key="gemini-fake-key",
+            provider="gemini",
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            model="gemini-3-flash-preview",
+        )
+
+    assert result["success"] is True
+    assert result["company_name"] == "Maersk Oil"
+    assert result["headquarters"] == "Copenhagen"
+    assert result["country"] == "Denmark"
+    assert result["country_code"] == "DK"
+    assert result["successor"] == "TotalEnergies"
+
+
+def test_headquarters_lookup_rejects_different_company() -> None:
+    gemini = MagicMock()
+    gemini.generate.return_value = GeminiResult(
+        text=(
+            '{"company_name":"Maersk Drilling","headquarters":"Kongens Lyngby",'
+            '"country":"Denmark","country_code":"DK",'
+            '"source_urls":["https://example.com/source"]}'
+        ),
+        source_urls={"https://example.com/source"},
+    )
+
+    with patch("services.ai_company_resolver.GeminiClient", return_value=gemini):
+        result = resolve_company_headquarters(
+            "Maersk Oil", api_key="key", provider="gemini", model="model"
+        )
+
+    assert result["success"] is False
+    assert "different company" in result["error"]
 
 
 def test_resolve_company_from_web_fallback_on_openai_error() -> None:
