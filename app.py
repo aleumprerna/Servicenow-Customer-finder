@@ -32,7 +32,7 @@ from browser.session_monitor import LoginSessionMonitor
 
 from config import PROJECT_ROOT, load_settings
 
-from services.ai_company_resolver import resolve_company_from_web
+from services.ai_company_resolver import resolve_company_from_web, resolve_company_headquarters
 
 from services.servicenow_deep_research import (
     DeepResearchService,
@@ -40,7 +40,12 @@ from services.servicenow_deep_research import (
     ServiceNowCustomerPageVerifier,
 )
 
-from services.servicenow_deep_research.crawler import BoundedOfficialCrawler
+from services.servicenow_deep_research.crawler import (
+    BoundedOfficialCrawler,
+    UnsafeResearchTarget,
+    normalize_domain,
+    validate_public_domain,
+)
 
 from workflow.database import WorkflowDatabase
 
@@ -3118,6 +3123,7 @@ def _deep_research_cell(row: dict[str, Any]) -> str:
     classification = str(row.get("dr_classification_status") or "")
     confidence = int(row.get("dr_confidence") or 0)
     domain = str(row.get("company_domain") or "").strip()
+    company_name = str(row.get("company_name") or "").strip()
     labels = {
         "CONFIRMED_CUSTOMER": ("Confirmed customer", "success"),
         "LIKELY_CUSTOMER": ("Likely customer", "success"),
@@ -3129,8 +3135,8 @@ def _deep_research_cell(row: dict[str, Any]) -> str:
     is_running = request_status == "running"
     has_result = bool(classification and row.get("dr_researched_at"))
     button_label = "Researching..." if is_running else "Run again" if has_result else "Deep Research"
-    disabled = " disabled" if is_running or not domain else ""
-    title = "" if domain else ' title="Add an official company website before researching"'
+    disabled = " disabled" if is_running or not company_name else ""
+    title = "" if domain else ' title="Official domain will be found with AI before research"'
     force = "true" if has_result else "false"
     button = (
         f'<button type="button" class="deep-research-btn" data-person-id="{person_id}" '
@@ -4199,12 +4205,12 @@ def start_deep_research(
         )
     company_name = str(person.get("company_name") or "").strip()
     official_domain = str(person.get("company_domain") or "").strip()
-    if not company_name or not official_domain:
+    if not company_name:
         return JSONResponse(
             status_code=422,
             content={
                 "success": False,
-                "error": "Resolve the company and its official website before running Deep Research.",
+                "error": "Resolve the company before running Deep Research.",
             },
         )
     existing = DATABASE.deep_research(person_id)
@@ -4229,6 +4235,54 @@ def start_deep_research(
                 ),
             },
         )
+    domain_error = ""
+    if official_domain:
+        try:
+            official_domain = normalize_domain(official_domain)
+            validate_public_domain(official_domain)
+        except UnsafeResearchTarget as exc:
+            domain_error = str(exc)
+            official_domain = ""
+    if not official_domain:
+        domain_result = resolve_company_headquarters(
+            company_name,
+            settings.llm_api_key,
+            company_domain=str(person.get("company_domain") or ""),
+            base_url=settings.llm_base_url,
+            model=settings.llm_model,
+            provider=settings.llm_provider,
+        )
+        candidate_domain = str(domain_result.get("company_domain") or "").strip()
+        try:
+            official_domain = normalize_domain(candidate_domain)
+            validate_public_domain(official_domain)
+        except UnsafeResearchTarget as exc:
+            reason = str(domain_result.get("error") or exc or domain_error)
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "success": False,
+                    "error": f"AI could not verify a usable official company domain: {reason}",
+                },
+            )
+        DATABASE.update_person_resolution(
+            person_id,
+            company_name=company_name,
+            status=str(person.get("resolution_status") or "manual_verified"),
+            error=str(person.get("resolution_error") or ""),
+            domain=official_domain,
+            company_linkedin_url=str(person.get("company_linkedin_url") or ""),
+        )
+        location_values = {
+            "company_name": company_name,
+            "headquarters": str(domain_result.get("headquarters") or "").strip(),
+            "country": str(domain_result.get("country") or "").strip(),
+            "country_code": str(domain_result.get("country_code") or "").strip(),
+        }
+        if any(location_values[key] for key in ("headquarters", "country", "country_code")):
+            DATABASE.upsert_check(
+                person_id, int(person["run_id"]), location_values
+            )
     if not force and DATABASE.deep_research_is_fresh(person_id, settings.deep_research_cache_days):
         return JSONResponse(
             content={"success": True, "cached": True, "research": DATABASE.deep_research(person_id)},

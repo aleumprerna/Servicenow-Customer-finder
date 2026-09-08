@@ -513,6 +513,89 @@ def test_start_endpoint_reports_missing_gemini_configuration(monkeypatch) -> Non
     assert "GEMINI_API_KEY" in payload["error"]
 
 
+def test_start_endpoint_resolves_missing_domain_with_ai(monkeypatch) -> None:
+    updates: list[dict[str, object]] = []
+
+    class Database:
+        def person(self, _person_id):
+            return {
+                "id": 10,
+                "run_id": 3,
+                "company_name": "Maersk Oil",
+                "company_domain": "",
+                "company_linkedin_url": "",
+                "resolution_status": "manual_verified",
+                "resolution_error": "",
+            }
+
+        def deep_research(self, _person_id):
+            return {"request_status": "running"} if updates else None
+
+        def deep_research_is_fresh(self, *_args):
+            return False
+
+        def update_person_resolution(self, person_id, **values):
+            updates.append({"person_id": person_id, **values})
+
+        def upsert_check(self, person_id, run_id, values):
+            updates.append({"person_id": person_id, "run_id": run_id, **values})
+
+        def claim_deep_research(self, **values):
+            updates.append(values)
+            return True
+
+    monkeypatch.setattr(dashboard, "DATABASE", Database())
+    monkeypatch.setattr(dashboard, "validate_public_domain", lambda _domain: None)
+    monkeypatch.setattr(
+        dashboard,
+        "resolve_company_headquarters",
+        lambda *_args, **_kwargs: {
+            "success": True,
+            "company_domain": "maerskoil.com",
+            "headquarters": "Copenhagen",
+            "country": "Denmark",
+            "country_code": "DK",
+        },
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "load_settings",
+        lambda: SimpleNamespace(
+            llm_api_key="key",
+            llm_provider="gemini",
+            llm_model="gemini-3-flash-preview",
+            llm_base_url="https://example.test",
+            deep_research_cache_days=30,
+        ),
+    )
+    tasks = BackgroundTasks()
+
+    response = dashboard.start_deep_research(
+        10, tasks, force=False, research_depth="deep"
+    )
+
+    assert response.status_code == 202
+    assert any(item.get("domain") == "maerskoil.com" for item in updates)
+    assert any(item.get("headquarters") == "Copenhagen" for item in updates)
+    assert any(item.get("official_domain") == "maerskoil.com" for item in updates)
+    assert len(tasks.tasks) == 1
+
+
+def test_deep_research_button_stays_enabled_when_only_domain_is_missing() -> None:
+    html = dashboard._deep_research_cell(
+        {
+            "person_id": 10,
+            "company_name": "Maersk Oil",
+            "company_domain": "",
+            "dr_request_status": "idle",
+        }
+    )
+
+    assert "Deep Research" in html
+    assert " disabled" not in html
+    assert "Official domain will be found with AI" in html
+
+
 def test_result_ui_shows_deep_research_action_and_evidence() -> None:
     row = {
         "person_id": 1,

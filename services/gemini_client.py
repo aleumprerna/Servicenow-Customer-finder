@@ -64,11 +64,18 @@ class GeminiClient:
         payload: dict[str, Any] = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         }
+        generation_config: dict[str, Any] = {"maxOutputTokens": 8192}
+        if self.model.casefold().startswith("gemini-3"):
+            generation_config["thinkingConfig"] = {"thinkingLevel": "low"}
+            # Gemini 3 supports structured output together with built-in tools.
+            generation_config["responseMimeType"] = "application/json"
         if tools:
             payload["tools"] = tools
         else:
-            payload["generationConfig"] = {"responseMimeType": "application/json"}
+            generation_config["responseMimeType"] = "application/json"
+        payload["generationConfig"] = generation_config
         response: requests.Response | None = None
+        empty_retries = 0
         for attempt in range(self.max_retries + 1):
             try:
                 response = self.session.post(
@@ -102,14 +109,21 @@ class GeminiClient:
                 data = response.json()
             except ValueError as exc:
                 raise GeminiAPIError("Gemini API returned invalid JSON.") from exc
-            break
+            text = self._response_text(data)
+            if text:
+                return GeminiResult(text=text, source_urls=self._source_urls(data))
+            detail = self._empty_response_detail(data)
+            if (
+                empty_retries < 1
+                and attempt < self.max_retries
+                and self._empty_response_is_retryable(data)
+            ):
+                empty_retries += 1
+                self.sleep(self._retry_delay(attempt, response, None))
+                continue
+            raise GeminiAPIError(f"Gemini returned no text response ({detail}).")
         else:  # pragma: no cover - loop always returns or raises
             raise GeminiAPIError("Gemini API request failed.")
-
-        text = self._response_text(data)
-        if not text:
-            raise GeminiAPIError("Gemini returned no text response.")
-        return GeminiResult(text=text, source_urls=self._source_urls(data))
 
     def _retry_delay(
         self,
@@ -180,8 +194,43 @@ class GeminiClient:
         except (KeyError, IndexError, TypeError):
             return ""
         return "\n".join(
-            str(part.get("text") or "") for part in parts if isinstance(part, dict)
+            str(part.get("text") or "")
+            for part in parts
+            if isinstance(part, dict) and part.get("thought") is not True
         ).strip()
+
+    @staticmethod
+    def _empty_response_is_retryable(data: dict[str, Any]) -> bool:
+        candidates = data.get("candidates")
+        if not isinstance(candidates, list) or not candidates:
+            # No candidates with no explicit prompt block is commonly transient.
+            prompt_feedback = data.get("promptFeedback")
+            return not isinstance(prompt_feedback, dict) or not prompt_feedback.get("blockReason")
+        candidate = candidates[0] if isinstance(candidates[0], dict) else {}
+        finish_reason = str(candidate.get("finishReason") or "").upper()
+        return finish_reason in {
+            "", "STOP", "MAX_TOKENS", "OTHER", "MALFORMED_RESPONSE", "TOO_MANY_TOOL_CALLS"
+        }
+
+    @staticmethod
+    def _empty_response_detail(data: dict[str, Any]) -> str:
+        details: list[str] = []
+        prompt_feedback = data.get("promptFeedback")
+        if isinstance(prompt_feedback, dict) and prompt_feedback.get("blockReason"):
+            details.append(f"prompt blocked: {prompt_feedback['blockReason']}")
+        candidates = data.get("candidates")
+        if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict):
+            candidate = candidates[0]
+            if candidate.get("finishReason"):
+                details.append(f"finishReason={candidate['finishReason']}")
+            if candidate.get("finishMessage"):
+                details.append(f"finishMessage={candidate['finishMessage']}")
+        usage = data.get("usageMetadata")
+        if isinstance(usage, dict):
+            for key in ("promptTokenCount", "thoughtsTokenCount", "candidatesTokenCount"):
+                if key in usage:
+                    details.append(f"{key}={usage[key]}")
+        return ", ".join(details) or "no candidate or diagnostic metadata"
 
     @staticmethod
     def _source_urls(data: dict[str, Any]) -> set[str]:
