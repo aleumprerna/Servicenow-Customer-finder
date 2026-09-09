@@ -53,6 +53,40 @@ def test_resolve_company_from_web_openai_success() -> None:
     assert result["source"] == "openai_web_search"
 
 
+def test_resolve_company_from_web_kie_uses_responses_web_search() -> None:
+    mock_response = MagicMock()
+    mock_response.output_text = (
+        '{"company_name":"Harbour Energy","headquarters":"Aberdeen, Scotland",'
+        '"country":"United Kingdom","country_code":"GB",'
+        '"source_urls":["https://www.harbourenergy.com/about-us/"],'
+        '"confidence":"high","reason":"Verified from the company website."}'
+    )
+    mock_client = MagicMock()
+    mock_client.responses.create.return_value = mock_response
+
+    with patch("services.ai_company_resolver.KieClient", return_value=mock_client) as client_class:
+        result = resolve_company_from_web(
+            person_name="Regitze Reeh",
+            linkedin_url="https://linkedin.com/in/regitze-reeh",
+            api_key="kie-fake-key",
+            provider="kie",
+            base_url="https://api.kie.ai/codex/v1",
+            model="gpt-6-astra",
+            require_headquarters=True,
+            require_grounding=True,
+        )
+
+    client_class.assert_called_once_with(
+        "kie-fake-key", base_url="https://api.kie.ai/codex/v1"
+    )
+    call = mock_client.responses.create.call_args.kwargs
+    assert call["model"] == "gpt-6-astra"
+    assert call["tools"] == [{"type": "web_search"}]
+    assert call["reasoning"] == {"effort": "high"}
+    assert result["success"] is True
+    assert result["source"] == "kie_web_search"
+
+
 def test_resolve_company_with_glm_chat_completions() -> None:
     mock_response = MagicMock()
     mock_response.choices = [

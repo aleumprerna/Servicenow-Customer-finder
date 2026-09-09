@@ -32,6 +32,7 @@ from services.servicenow_deep_research.research_service import (
     _source_key,
 )
 from services.servicenow_deep_research.schemas import (
+    ClassificationSuggestion,
     EvidenceFinding,
     ResearchClassification,
 )
@@ -84,7 +85,37 @@ def test_grounded_official_servicenow_story_is_confirmed() -> None:
     )
 
     assert result.status == ResearchClassification.CONFIRMED_CUSTOMER
-    assert result.confidence >= 96
+    assert result.confidence == 100
+
+
+def test_model_cannot_lower_official_servicenow_story_confidence() -> None:
+    result = classify_evidence(
+        company_name="Adobe",
+        official_domain="adobe.com",
+        findings=[
+            EvidenceFinding(
+                url="https://www.servicenow.com/customers/adobe.html",
+                page_title="Adobe customer story",
+                evidence="ServiceNow publishes an official customer story for Adobe.",
+                evidence_type="official_servicenow_customer_story",
+                strength="strong",
+                category="CUSTOMER_EVIDENCE",
+                citation_grounded=True,
+            )
+        ],
+        sources_checked=1,
+        research_depth="deep",
+        model_provider="test",
+        suggestion=ClassificationSuggestion(
+            status="CONFIRMED_CUSTOMER",
+            confidence=1,
+            summary="Low-confidence model suggestion.",
+        ),
+    )
+
+    assert result.status == ResearchClassification.CONFIRMED_CUSTOMER
+    assert result.confidence == 100
+    assert "official ServiceNow customer story" in result.summary
 
 
 def test_partner_only_evidence_never_becomes_customer_evidence() -> None:
@@ -172,6 +203,29 @@ def test_customer_page_verifier_requires_official_story_content() -> None:
 
     assert result.found is True
     assert result.url == Response.url
+
+
+def test_customer_page_verifier_checks_global_story_url_first() -> None:
+    requested_urls = []
+
+    class Response:
+        status_code = 200
+        url = "https://www.servicenow.com/customers/adobe.html"
+        text = (
+            "<title>Adobe - ServiceNow Customer Story</title>"
+            "<h2>Customer Details</h2><p>Customer Adobe</p>"
+        )
+
+    class Session:
+        def get(self, url, **_kwargs):
+            requested_urls.append(url)
+            return Response()
+
+    result = ServiceNowCustomerPageVerifier(session=Session()).check("Adobe")
+
+    assert result.found is True
+    assert result.url == "https://www.servicenow.com/customers/adobe.html"
+    assert requested_urls == ["https://www.servicenow.com/customers/adobe.html"]
 
 
 def test_customer_page_verifier_rejects_generic_servicenow_page() -> None:
@@ -279,6 +333,52 @@ def test_verified_servicenow_story_is_added_to_research_result() -> None:
     assert result.customer_evidence[0].evidence_type == "official_servicenow_customer_story"
 
 
+def test_servicenow_directory_yes_is_authoritative_when_story_fetch_is_unavailable() -> None:
+    class Crawler:
+        def crawl(self, _domain):
+            return CrawlReport(findings=[], sources_checked=0, discovered_urls=[])
+
+    class Provider:
+        model = "test-model"
+        provider_label = "test:test-model"
+
+        def discover(self, **_kwargs):
+            return SimpleNamespace(findings=[], source_urls=set())
+
+        def suggest_classification(self, **_kwargs):
+            return ClassificationSuggestion(
+                status="CONFIRMED_CUSTOMER",
+                confidence=1,
+                summary="Low-confidence model suggestion.",
+            )
+
+    class Verifier:
+        def check(self, _company_name, _discovered_urls):
+            return SimpleNamespace(found=None, url="", checked_urls=())
+
+    result = DeepResearchService(
+        provider=Provider(),
+        crawler=Crawler(),
+        customer_page_verifier=Verifier(),
+    ).research(
+        company_name="Adobe",
+        official_domain="adobe.com",
+        existing_context={
+            "servicenow_customer": "Yes",
+            "servicenow_matched_name": "Adobe Systems Inc",
+            "match_score": "84",
+        },
+    )
+
+    assert result.status == ResearchClassification.CONFIRMED_CUSTOMER
+    assert result.confidence == 100
+    assert result.relevant_sources == 1
+    assert result.customer_evidence[0].evidence_type == (
+        "official_servicenow_customer_directory_match"
+    )
+    assert result.servicenow_customer_page_found is None
+
+
 def test_openai_discovery_is_official_domain_scoped_and_source_grounded() -> None:
     calls = []
 
@@ -338,6 +438,39 @@ def test_openai_discovery_is_official_domain_scoped_and_source_grounded() -> Non
     assert calls[0]["text"]["format"]["type"] == "json_schema"
     assert [finding.url for finding in discovery.findings] == ["https://example.com/technology"]
     assert discovery.findings[0].citation_grounded is True
+
+
+def test_kie_discovery_adds_configured_reasoning_effort() -> None:
+    calls = []
+
+    class Response:
+        output_text = '{"findings":[]}'
+
+        def model_dump(self, **_kwargs):
+            return {"output": []}
+
+    class Responses:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return Response()
+
+    provider = object.__new__(OpenAIResearchProvider)
+    provider.model = "gpt-6-astra"
+    provider.provider_name = "kie"
+    provider.supports_hosted_web_search = True
+    provider.reasoning_effort = "high"
+    provider.client = SimpleNamespace(responses=Responses())
+
+    provider.discover(
+        company_name="Example Company",
+        official_domain="example.com",
+        existing_context={},
+        official_only=True,
+    )
+
+    assert calls[0]["model"] == "gpt-6-astra"
+    assert calls[0]["tools"][0]["type"] == "web_search"
+    assert calls[0]["reasoning"] == {"effort": "high"}
 
 
 def test_provider_rejects_model_urls_when_grounding_metadata_is_missing() -> None:

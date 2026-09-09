@@ -117,9 +117,10 @@ class ServiceNowCustomerPageVerifier:
             if _is_servicenow_story_url(clean) and clean not in candidates:
                 candidates.append(clean)
         for slug in customer_story_slugs(company_name):
-            url = f"https://www.servicenow.com/in/customers/{slug}.html"
-            if url not in candidates:
-                candidates.append(url)
+            for path_prefix in ("", "/in"):
+                url = f"https://www.servicenow.com{path_prefix}/customers/{slug}.html"
+                if url not in candidates:
+                    candidates.append(url)
 
         checked: list[str] = []
         received_response = False

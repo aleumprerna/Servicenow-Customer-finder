@@ -11,6 +11,7 @@ from openai import OpenAI
 import requests
 
 from services.gemini_client import GeminiClient
+from services.kie_client import KieClient
 
 from .classifier import classify_evidence
 from .customer_page import ServiceNowCustomerPageVerifier
@@ -99,6 +100,33 @@ class ResearchProviderError(DeepResearchError):
 class ProviderDiscovery:
     findings: list[EvidenceFinding]
     source_urls: set[str]
+
+
+def servicenow_directory_finding(
+    company_name: str, existing_context: dict[str, Any]
+) -> EvidenceFinding | None:
+    """Convert an observed ServiceNow customer-directory match into authoritative evidence."""
+
+    if str(existing_context.get("servicenow_customer") or "").strip().casefold() != "yes":
+        return None
+    matched_name = " ".join(
+        str(existing_context.get("servicenow_matched_name") or company_name).split()
+    )
+    score = str(existing_context.get("match_score") or "").strip()
+    score_detail = f" (name-match score {score}%)" if score else ""
+    return EvidenceFinding(
+        url="https://www.servicenow.com/customers.html",
+        page_title="ServiceNow Customer Stories",
+        evidence=(
+            f"ServiceNow's official customer search returned {matched_name} for "
+            f"{company_name}{score_detail}."
+        ),
+        evidence_type="official_servicenow_customer_directory_match",
+        strength="strong",
+        category="CUSTOMER_EVIDENCE",
+        official_source=False,
+        citation_grounded=True,
+    )
 
 
 def _response_source_urls(response: Any) -> set[str]:
@@ -227,6 +255,7 @@ class LLMResearchProvider:
         base_url: str | None = None,
         provider_name: str = "openai",
         supports_hosted_web_search: bool = True,
+        reasoning_effort: str | None = None,
         timeout_seconds: float = 180.0,
         max_retries: int = 4,
         retry_base_seconds: float = 2.0,
@@ -238,6 +267,7 @@ class LLMResearchProvider:
         self.model = model
         self.provider_name = provider_name.casefold()
         self.supports_hosted_web_search = supports_hosted_web_search
+        self.reasoning_effort = reasoning_effort
         if self.provider_name == "gemini":
             self.client = GeminiClient(
                 api_key,
@@ -246,6 +276,12 @@ class LLMResearchProvider:
                 timeout_seconds=timeout_seconds,
                 max_retries=max_retries,
                 retry_base_seconds=retry_base_seconds,
+            )
+        elif self.provider_name == "kie":
+            self.client = KieClient(
+                api_key,
+                base_url=base_url or "https://api.kie.ai/codex/v1",
+                timeout_seconds=timeout_seconds,
             )
         else:
             self.client = OpenAI(
@@ -352,14 +388,30 @@ result's URL. Do not invent URLs or evidence. Return an empty findings list when
                 response = self.client.generate(prompt, use_google_search=True)
                 payload = _json_object(response.text)
                 source_urls = _expand_grounding_source_urls(response.source_urls)
+            elif getattr(self, "provider_name", "openai") == "kie":
+                request: dict[str, Any] = {
+                    "model": self.model,
+                    "tools": [{"type": "web_search"}],
+                    "input": prompt,
+                }
+                reasoning_effort = getattr(self, "reasoning_effort", None)
+                if reasoning_effort:
+                    request["reasoning"] = {"effort": reasoning_effort}
+                response = self.client.responses.create(**request)
+                payload = _json_object(response.output_text)
+                source_urls = _response_source_urls(response)
             else:
-                response = self.client.responses.create(
-                    model=self.model,
-                    tools=[search_tool],
-                    include=["web_search_call.action.sources"],
-                    text=FINDINGS_FORMAT,
-                    input=prompt,
-                )
+                request: dict[str, Any] = {
+                    "model": self.model,
+                    "tools": [search_tool],
+                    "include": ["web_search_call.action.sources"],
+                    "text": FINDINGS_FORMAT,
+                    "input": prompt,
+                }
+                reasoning_effort = getattr(self, "reasoning_effort", None)
+                if reasoning_effort:
+                    request["reasoning"] = {"effort": reasoning_effort}
+                response = self.client.responses.create(**request)
                 payload = _json_object(response.output_text)
                 source_urls = _response_source_urls(response)
         except ResearchProviderError:
@@ -390,12 +442,26 @@ Evidence: {json.dumps(evidence, ensure_ascii=False)[:28000]}
         try:
             if self.provider_name == "gemini":
                 output_text = self.client.generate(prompt).text
+            elif self.provider_name == "kie":
+                request: dict[str, Any] = {
+                    "model": self.model,
+                    "input": prompt,
+                }
+                reasoning_effort = getattr(self, "reasoning_effort", None)
+                if reasoning_effort:
+                    request["reasoning"] = {"effort": reasoning_effort}
+                response = self.client.responses.create(**request)
+                output_text = response.output_text
             elif self.supports_hosted_web_search:
-                response = self.client.responses.create(
-                    model=self.model,
-                    text=CLASSIFICATION_FORMAT,
-                    input=prompt,
-                )
+                request: dict[str, Any] = {
+                    "model": self.model,
+                    "text": CLASSIFICATION_FORMAT,
+                    "input": prompt,
+                }
+                reasoning_effort = getattr(self, "reasoning_effort", None)
+                if reasoning_effort:
+                    request["reasoning"] = {"effort": reasoning_effort}
+                response = self.client.responses.create(**request)
                 output_text = response.output_text
             else:
                 response = self.client.chat.completions.create(
@@ -446,6 +512,9 @@ class DeepResearchService:
 
         context = dict(existing_context or {})
         findings = list(crawl_report.findings)
+        directory_finding = servicenow_directory_finding(company, context)
+        if directory_finding is not None:
+            findings.append(directory_finding)
         discovered_source_urls: set[str] = set()
         sources_checked = crawl_report.sources_checked
         LOGGER.info("Deep research official crawl finished for %s (%s pages)", domain, sources_checked)

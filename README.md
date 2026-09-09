@@ -149,16 +149,17 @@ At minimum, set:
 
 ```dotenv
 APOLLO_API_KEY=your_real_key
-LLM_PROVIDER=gemini
-GEMINI_API_KEY=your_google_ai_studio_key
-GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta
-GEMINI_MODEL=gemini-3-flash-preview
+LLM_PROVIDER=kie
+KIE_API_KEY=your_kie_api_key
+KIE_BASE_URL=https://api.kie.ai/codex/v1
+KIE_MODEL=gpt-6-astra
+KIE_REASONING_EFFORT=high
 CHROME_CDP_URL=http://localhost:9222
 INPUT_CSV=companies.csv
 OUTPUT_CSV=companies_checked.csv
 ```
 
-`LLM_PROVIDER=gemini` sends all active model calls to Gemini 3 Flash Preview. Company resolution uses Gemini's Google Search grounding and URL context; deep research combines the existing bounded crawler with Gemini search and reasoning. Keep the GLM and OpenAI settings in `.env`; they remain inactive until their provider is selected.
+`LLM_PROVIDER=kie` sends all active model calls to KIE's `POST /codex/v1/responses` endpoint with `gpt-6-astra`, high reasoning effort, and its hosted web-search tool. `KIE_BASE_URL` intentionally ends at `/codex/v1` because the application appends `/responses`. KIE's streamed response events are consumed internally and exposed to the rest of the application as one completed response. Gemini, GLM, and OpenAI remain configured alternatives and can be restored by changing only `LLM_PROVIDER`.
 
 Do not commit `.env`. The optional `SERVICENOW_USERNAME` and `SERVICENOW_PASSWORD` values are reserved for a possible future login flow and are not read or logged by the current workflow. `HEADLESS` is also informational because an attached browser keeps its existing mode.
 

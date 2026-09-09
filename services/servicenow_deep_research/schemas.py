@@ -39,9 +39,10 @@ class EvidenceFinding(BaseModel):
     strength: EvidenceStrength = EvidenceStrength.WEAK
     category: EvidenceCategory = EvidenceCategory.AMBIGUOUS
     official_source: bool = False
-    # True only when the URL came from a page the crawler fetched or from the
-    # search provider's grounding metadata.  Model-written URLs alone are not
-    # citations and must never be rendered as links.
+    # True only when the URL came from a page the crawler fetched, an observed
+    # ServiceNow customer-directory result, or search-provider grounding
+    # metadata. Model-written URLs alone are not citations and must never be
+    # rendered as links.
     citation_grounded: bool = False
 
     @field_validator("url")

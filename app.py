@@ -4141,6 +4141,7 @@ def _run_deep_research_task(database: WorkflowDatabase, person_id: int, settings
             base_url=settings.llm_base_url,
             provider_name=settings.llm_provider,
             supports_hosted_web_search=settings.llm_supports_hosted_web_search,
+            reasoning_effort=settings.llm_reasoning_effort,
             timeout_seconds=settings.deep_research_request_timeout_seconds,
             max_retries=settings.gemini_max_retries,
             retry_base_seconds=settings.gemini_retry_base_seconds,
@@ -4227,7 +4228,9 @@ def start_deep_research(
             content={
                 "success": False,
                 "error": (
-                    "Add GEMINI_API_KEY to enable Deep Research."
+                    "Add KIE_API_KEY to enable Deep Research."
+                    if settings.llm_provider == "kie"
+                    else "Add GEMINI_API_KEY to enable Deep Research."
                     if settings.llm_provider == "gemini"
                     else "Add GLM_KEY to enable Deep Research."
                     if settings.llm_provider == "glm"

@@ -38,11 +38,26 @@ def classify_evidence(
         and item.citation_grounded
         and item.strength == EvidenceStrength.STRONG
     ]
+    official_servicenow_directory_matches = [
+        item for item in customer
+        if item.evidence_type == "official_servicenow_customer_directory_match"
+        and item.citation_grounded
+        and item.strength == EvidenceStrength.STRONG
+    ]
+    authoritative_servicenow_evidence = (
+        official_servicenow_stories + official_servicenow_directory_matches
+    )
 
     if official_servicenow_stories:
         status = ResearchClassification.CONFIRMED_CUSTOMER
-        confidence = min(99, 96 + (len(official_servicenow_stories) - 1) * 2)
+        confidence = 100
         summary = f"An official ServiceNow customer story confirms {company_name} as a customer."
+    elif official_servicenow_directory_matches:
+        status = ResearchClassification.CONFIRMED_CUSTOMER
+        confidence = 100
+        summary = (
+            f"ServiceNow's official customer directory confirms {company_name} as a customer."
+        )
     elif official_strong:
         status = ResearchClassification.CONFIRMED_CUSTOMER
         confidence = min(98, 92 + (len(official_strong) - 1) * 2)
@@ -74,7 +89,7 @@ def classify_evidence(
 
     # A model may improve the wording and fine-tune confidence, but never cross
     # the evidence-derived classification boundary.
-    if suggestion and suggestion.status == status:
+    if suggestion and suggestion.status == status and not authoritative_servicenow_evidence:
         summary = suggestion.summary
         ranges = {
             ResearchClassification.CONFIRMED_CUSTOMER: (90, 100),

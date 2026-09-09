@@ -37,7 +37,11 @@ class Settings(BaseModel):
     result_selectors: tuple[str, ...] = ()
     n8n_webhook_url: str | None = None
     app_base_url: str = "http://localhost:8000"
-    llm_provider: str = "gemini"
+    llm_provider: str = "kie"
+    kie_api_key: str | None = None
+    kie_base_url: str = "https://api.kie.ai/codex/v1"
+    kie_model: str = "gpt-6-astra"
+    kie_reasoning_effort: str = "high"
     gemini_api_key: str | None = None
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     gemini_model: str = "gemini-3-flash-preview"
@@ -66,31 +70,41 @@ class Settings(BaseModel):
     def validate_thresholds(self) -> "Settings":
         if self.review_threshold >= self.match_threshold:
             raise ValueError("REVIEW_THRESHOLD must be lower than MATCH_THRESHOLD")
-        if self.llm_provider not in {"gemini", "glm", "openai"}:
-            raise ValueError("LLM_PROVIDER must be 'gemini', 'glm', or 'openai'")
+        if self.llm_provider not in {"kie", "gemini", "glm", "openai"}:
+            raise ValueError("LLM_PROVIDER must be 'kie', 'gemini', 'glm', or 'openai'")
         return self
 
     @property
     def llm_api_key(self) -> str | None:
+        if self.llm_provider == "kie":
+            return self.kie_api_key
         if self.llm_provider == "gemini":
             return self.gemini_api_key
         return self.glm_api_key if self.llm_provider == "glm" else self.openai_api_key
 
     @property
     def llm_base_url(self) -> str:
+        if self.llm_provider == "kie":
+            return self.kie_base_url
         if self.llm_provider == "gemini":
             return self.gemini_base_url
         return self.glm_base_url if self.llm_provider == "glm" else self.openai_base_url
 
     @property
     def llm_model(self) -> str:
+        if self.llm_provider == "kie":
+            return self.kie_model
         if self.llm_provider == "gemini":
             return self.gemini_model
         return self.glm_model if self.llm_provider == "glm" else self.openai_model
 
     @property
     def llm_supports_hosted_web_search(self) -> bool:
-        return self.llm_provider in {"gemini", "openai"}
+        return self.llm_provider in {"kie", "gemini", "openai"}
+
+    @property
+    def llm_reasoning_effort(self) -> str | None:
+        return self.kie_reasoning_effort if self.llm_provider == "kie" else None
 
 
 def _optional(name: str) -> str | None:
@@ -135,7 +149,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         value = file_values.get(name)
         return str(value).strip() if value is not None else os.getenv(name, default).strip()
 
-    llm_provider = dynamic_value("LLM_PROVIDER", "gemini").casefold()
+    llm_provider = dynamic_value("LLM_PROVIDER", "kie").casefold()
     data: dict[str, Any] = {
         "apollo_api_key": os.getenv("APOLLO_API_KEY", "").strip(),
         "apollo_base_url": os.getenv("APOLLO_BASE_URL", "https://api.apollo.io/api/v1").strip(),
@@ -158,6 +172,10 @@ def load_settings(env_file: Path | None = None) -> Settings:
         "n8n_webhook_url": dynamic_value("N8N_WEBHOOK_URL") or None,
         "app_base_url": dynamic_value("APP_BASE_URL", "http://localhost:8000"),
         "llm_provider": llm_provider,
+        "kie_api_key": dynamic_value("KIE_API_KEY") or _optional("KIE_API_KEY"),
+        "kie_base_url": dynamic_value("KIE_BASE_URL", "https://api.kie.ai/codex/v1"),
+        "kie_model": dynamic_value("KIE_MODEL", "gpt-6-astra"),
+        "kie_reasoning_effort": dynamic_value("KIE_REASONING_EFFORT", "high"),
         "gemini_api_key": (
             dynamic_value("GEMINI_API_KEY")
             or dynamic_value("GEMINI_KEY")

@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from config import load_settings
 from services.country_normalizer import CountryNormalizationError, normalize_country
 from services.gemini_client import GeminiClient
+from services.kie_client import KieClient
 from services.company_matcher import company_match_score
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,26 @@ def _valid_source_urls(value: Any) -> list[str]:
         parsed = urlsplit(url)
         if parsed.scheme in {"http", "https"} and parsed.netloc and url not in output:
             output.append(url)
+    return output
+
+
+def _valid_source_urls_from_payload(value: Any) -> list[str]:
+    output: list[str] = []
+
+    def visit(item: Any) -> None:
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if key in {"url", "uri"} and isinstance(child, str):
+                    for url in _valid_source_urls([child]):
+                        if url not in output:
+                            output.append(url)
+                else:
+                    visit(child)
+        elif isinstance(item, list):
+            for child in item:
+                visit(child)
+
+    visit(value)
     return output
 
 
@@ -71,10 +92,10 @@ def resolve_company_headquarters(
     company = " ".join(str(company_name or "").split())
     if not company:
         return {"success": False, "error": "A company name is required."}
-    if not key or provider_name not in {"gemini", "openai"}:
+    if not key or provider_name not in {"kie", "gemini", "openai"}:
         return {
             "success": False,
-            "error": "A web-search-capable Gemini or OpenAI provider is required.",
+            "error": "A web-search-capable KIE, Gemini, or OpenAI provider is required.",
         }
 
     prompt = f"""
@@ -106,10 +127,21 @@ Return JSON only:
             ).generate(prompt, use_google_search=True, use_url_context=True)
             raw_text = response.text
             source_urls = sorted(response.source_urls)
+        elif provider_name == "kie":
+            response = KieClient(key, base_url=selected_base_url).responses.create(
+                model=selected_model,
+                tools=[{"type": "web_search"}],
+                input=prompt,
+                reasoning={"effort": settings.kie_reasoning_effort},
+            )
+            raw_text = response.output_text
+            source_urls = _valid_source_urls_from_payload(response.model_dump())
         else:
             import openai
 
-            response = openai.OpenAI(api_key=key, base_url=selected_base_url).responses.create(
+            response = openai.OpenAI(
+                api_key=key, base_url=selected_base_url
+            ).responses.create(
                 model=selected_model,
                 tools=[{"type": "web_search_preview"}],
                 input=prompt,
@@ -166,7 +198,7 @@ def resolve_company_from_web(
     """Search the web to resolve a person's current company from their LinkedIn profile.
 
     Uses the configured LLM provider with a fallback to headline parsing.
-    Gemini and OpenAI use grounded web search; GLM uses supplied profile context.
+    KIE, Gemini, and OpenAI use grounded web search; GLM uses supplied profile context.
     """
     settings = load_settings()
     provider_name = (provider or settings.llm_provider).casefold()
@@ -186,7 +218,7 @@ def resolve_company_from_web(
                 f"Headline / Current Role Context: {headline}\n\n"
                 + (
                     "Search the web, including recent reliable sources, to determine the current employer.\n"
-                    if provider_name in {"openai", "gemini"}
+                    if provider_name in {"kie", "openai", "gemini"}
                     else "Use only the supplied profile URL and headline context. Do not claim to have browsed the web.\n"
                 )
                 + "Confirm the person's CURRENT employer, not a previous employer. Find the "
@@ -218,6 +250,15 @@ def resolve_company_from_web(
                 ).generate(prompt, use_google_search=True, use_url_context=True)
                 raw_text = result.text
                 source_urls = sorted(result.source_urls)
+            elif provider_name == "kie":
+                response = KieClient(key, base_url=selected_base_url).responses.create(
+                    model=selected_model,
+                    tools=[{"type": "web_search"}],
+                    input=prompt,
+                    reasoning={"effort": settings.kie_reasoning_effort},
+                )
+                raw_text = response.output_text
+                source_urls = _valid_source_urls_from_payload(response.model_dump())
             elif provider_name == "openai":
                 import openai
 
@@ -262,7 +303,7 @@ def resolve_company_from_web(
                         validation_error = (
                             f"AI found {company_name}, but could not verify its headquarters and country."
                         )
-                    elif require_grounding and provider_name == "gemini" and not source_urls:
+                    elif require_grounding and provider_name in {"kie", "gemini"} and not source_urls:
                         validation_error = (
                             f"AI found {company_name}, but returned no supporting web source."
                         )
@@ -283,8 +324,8 @@ def resolve_company_from_web(
                             "reason": str(data.get("reason") or "Resolved via web search"),
                             "source_urls": source_urls,
                             "source": (
-                                "openai_web_search"
-                                if provider_name == "openai"
+                                f"{provider_name}_web_search"
+                                if provider_name in {"kie", "openai"}
                                 else "gemini_google_search"
                                 if provider_name == "gemini"
                                 else "glm_profile_context"
