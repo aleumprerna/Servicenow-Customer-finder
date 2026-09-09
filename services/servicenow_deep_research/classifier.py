@@ -32,8 +32,18 @@ def classify_evidence(
     external_strong = [
         item for item in customer if not item.official_source and item.strength == EvidenceStrength.STRONG
     ]
+    official_servicenow_stories = [
+        item for item in customer
+        if item.evidence_type == "official_servicenow_customer_story"
+        and item.citation_grounded
+        and item.strength == EvidenceStrength.STRONG
+    ]
 
-    if official_strong:
+    if official_servicenow_stories:
+        status = ResearchClassification.CONFIRMED_CUSTOMER
+        confidence = min(99, 96 + (len(official_servicenow_stories) - 1) * 2)
+        summary = f"An official ServiceNow customer story confirms {company_name} as a customer."
+    elif official_strong:
         status = ResearchClassification.CONFIRMED_CUSTOMER
         confidence = min(98, 92 + (len(official_strong) - 1) * 2)
         summary = f"Official {company_name} sources explicitly indicate internal ServiceNow use."

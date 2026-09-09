@@ -3128,7 +3128,7 @@ def _deep_research_cell(row: dict[str, Any]) -> str:
         "CONFIRMED_CUSTOMER": ("Confirmed customer", "success"),
         "LIKELY_CUSTOMER": ("Likely customer", "success"),
         "INCONCLUSIVE": ("Inconclusive", "warning"),
-        "NO_OFFICIAL_EVIDENCE": ("No official evidence", "neutral"),
+        "NO_OFFICIAL_EVIDENCE": ("Not verified", "neutral"),
         "PARTNER_ONLY": ("Partner evidence only", "info"),
     }
     label, tone = labels.get(classification, ("Not researched", "neutral"))
@@ -3217,7 +3217,7 @@ def _simplified_results_table(rows: list[dict[str, Any]]) -> str:
             "yes"
             if portal_customer_raw == "yes" or story_check == 1
             else "no"
-            if portal_customer_raw == "no" or story_check == 0
+            if portal_customer_raw == "no"
             else portal_customer_raw
         )
         customer_label = "Yes" if customer_raw == "yes" else "No" if customer_raw == "no" else "Needs review" if customer_raw == "unknown" else "Pending"

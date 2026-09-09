@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import socket
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import BackgroundTasks
@@ -27,8 +28,13 @@ from services.servicenow_deep_research.research_service import (
     DeepResearchService,
     OpenAIResearchProvider,
     ResearchProviderError,
+    _expand_grounding_source_urls,
+    _source_key,
 )
-from services.servicenow_deep_research.schemas import ResearchClassification
+from services.servicenow_deep_research.schemas import (
+    EvidenceFinding,
+    ResearchClassification,
+)
 from workflow.database import WorkflowDatabase
 
 
@@ -55,6 +61,30 @@ def test_strong_official_internal_use_is_confirmed() -> None:
     assert result.status == ResearchClassification.CONFIRMED_CUSTOMER
     assert result.confidence >= 90
     assert len(result.customer_evidence) == 1
+
+
+def test_grounded_official_servicenow_story_is_confirmed() -> None:
+    result = classify_evidence(
+        company_name="Example Company",
+        official_domain="example.com",
+        findings=[
+            EvidenceFinding(
+                url="https://www.servicenow.com/customers/example-company.html",
+                page_title="Example Company customer story",
+                evidence="ServiceNow publishes an official customer story for Example Company.",
+                evidence_type="official_servicenow_customer_story",
+                strength="strong",
+                category="CUSTOMER_EVIDENCE",
+                citation_grounded=True,
+            )
+        ],
+        sources_checked=1,
+        research_depth="deep",
+        model_provider="test",
+    )
+
+    assert result.status == ResearchClassification.CONFIRMED_CUSTOMER
+    assert result.confidence >= 96
 
 
 def test_partner_only_evidence_never_becomes_customer_evidence() -> None:
@@ -359,6 +389,52 @@ def test_provider_stores_the_authoritative_grounding_url() -> None:
     assert findings[0].citation_grounded is True
 
 
+def test_google_grounding_redirect_is_expanded_to_publisher_url() -> None:
+    redirect_url = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/token"
+    publisher_url = "https://www.servicenow.com/customers/example-company.html"
+    response = MagicMock()
+    response.headers = {"Location": publisher_url}
+    session = MagicMock()
+    session.get.return_value = response
+
+    urls = _expand_grounding_source_urls({redirect_url}, session=session)
+
+    assert redirect_url in urls
+    assert publisher_url in urls
+    response.close.assert_called_once()
+
+
+def test_servicenow_global_and_locale_customer_urls_have_same_source_key() -> None:
+    assert _source_key("https://www.servicenow.com/customers/adobe.html") == _source_key(
+        "https://www.servicenow.com/in/customers/adobe.html"
+    )
+
+
+def test_expanded_grounding_url_retains_model_finding() -> None:
+    publisher_url = "https://www.servicenow.com/customers/example-company.html"
+    findings = OpenAIResearchProvider._findings(
+        {
+            "findings": [
+                {
+                    "url": publisher_url,
+                    "page_title": "Example Company customer story",
+                    "evidence": "Example Company uses ServiceNow internally for IT operations.",
+                    "evidence_type": "explicit_internal_usage",
+                    "strength": "strong",
+                    "category": "CUSTOMER_EVIDENCE",
+                }
+            ]
+        },
+        "example.com",
+        official_only=False,
+        source_urls={publisher_url},
+    )
+
+    assert len(findings) == 1
+    assert findings[0].url == publisher_url
+    assert findings[0].citation_grounded is True
+
+
 def test_research_result_is_persisted_and_reused_from_cache(tmp_path) -> None:
     database = WorkflowDatabase(tmp_path / "workflow.db")
     database.initialize()
@@ -595,6 +671,25 @@ def test_deep_research_button_stays_enabled_when_only_domain_is_missing() -> Non
     assert "Deep Research" in html
     assert " disabled" not in html
     assert "Official domain will be found with AI" in html
+
+
+def test_missing_customer_story_does_not_turn_unknown_customer_into_no() -> None:
+    row = {
+        "person_id": 10,
+        "person_name": "Raymond Moore",
+        "company_name": "Maersk Oil",
+        "company_domain": "maerskoil.com",
+        "servicenow_customer": "Unknown",
+        "dr_request_status": "completed",
+        "dr_classification_status": "NO_OFFICIAL_EVIDENCE",
+        "dr_servicenow_customer_page_found": 0,
+        "dr_researched_at": "2026-09-08T00:00:00+00:00",
+    }
+
+    html = dashboard._simplified_results_table([row])
+
+    assert "Not verified" in html
+    assert ">Needs review<" in html
 
 
 def test_result_ui_shows_deep_research_action_and_evidence() -> None:

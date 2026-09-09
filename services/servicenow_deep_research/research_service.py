@@ -5,9 +5,10 @@ import logging
 import re
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from openai import OpenAI
+import requests
 
 from services.gemini_client import GeminiClient
 
@@ -124,6 +125,16 @@ def _response_source_urls(response: Any) -> set[str]:
 
 def _source_key(url: str) -> str:
     parsed = urlsplit(url)
+    hostname = (parsed.hostname or "").casefold().rstrip(".")
+    if hostname == "www.servicenow.com":
+        hostname = "servicenow.com"
+    path = parsed.path.rstrip("/") or "/"
+    if hostname == "servicenow.com":
+        # ServiceNow serves the same customer story under locale-prefixed and
+        # global URLs (for example /in/customers/adobe.html and
+        # /customers/adobe.html). Treat only that documented path variation as
+        # equivalent; all other publisher URLs still require an exact match.
+        path = re.sub(r"^/[a-z]{2}(?:-[a-z]{2})?/(?=customers/)", "/", path, flags=re.I)
     query = urlencode(
         [
             (key, value)
@@ -132,8 +143,59 @@ def _source_key(url: str) -> str:
         ]
     )
     return urlunsplit(
-        (parsed.scheme.casefold(), parsed.netloc.casefold(), parsed.path.rstrip("/") or "/", query, "")
+        (parsed.scheme.casefold(), hostname, path, query, "")
     )
+
+
+def _expand_grounding_source_urls(
+    source_urls: set[str],
+    *,
+    session: requests.Session | None = None,
+    timeout_seconds: float = 10.0,
+) -> set[str]:
+    """Add publisher URLs hidden behind Google grounding redirects.
+
+    Gemini returns cryptographically generated vertexaisearch redirect URLs as
+    grounding citations while its JSON answer normally names the final source.
+    Resolve only the Google redirect chain and stop before fetching the external
+    publisher page. This lets strict URL matching retain genuinely grounded
+    findings without trusting arbitrary model-written URLs.
+    """
+
+    output = {str(url).strip().rstrip("/") for url in source_urls if str(url).strip()}
+    http = session or requests.Session()
+    for source_url in tuple(output):
+        parsed = urlsplit(source_url)
+        if parsed.hostname != "vertexaisearch.cloud.google.com" or not parsed.path.startswith(
+            "/grounding-api-redirect/"
+        ):
+            continue
+        current = source_url
+        for _ in range(4):
+            try:
+                response = http.get(
+                    current,
+                    allow_redirects=False,
+                    stream=True,
+                    timeout=timeout_seconds,
+                )
+            except requests.RequestException:
+                break
+            try:
+                location = str(response.headers.get("Location") or "").strip()
+            finally:
+                response.close()
+            if not location:
+                break
+            target = urljoin(current, location).rstrip("/")
+            target_parts = urlsplit(target)
+            if target_parts.scheme not in {"http", "https"} or not target_parts.hostname:
+                break
+            output.add(target)
+            if target_parts.hostname != "vertexaisearch.cloud.google.com":
+                break
+            current = target
+    return output
 
 
 def _json_object(text: str) -> dict[str, Any]:
@@ -256,9 +318,12 @@ class LLMResearchProvider:
         if not getattr(self, "supports_hosted_web_search", True):
             return ProviderDiscovery(findings=[], source_urls=set())
         scope = "Only use sources hosted on the official domain or its subdomains." if official_only else (
-            "Use reliable third-party sources. Specifically look for an official ServiceNow Customer "
-            "Story under servicenow.com/*/customers/{company-slug}.html. Exclude social forums, "
-            "aggregators, and unsourced directories."
+            "Search in this strict order: (1) official ServiceNow customer stories and case studies "
+            "under servicenow.com, (2) the company's official website and current careers pages, "
+            "(3) current LinkedIn employees whose current role explicitly concerns ServiceNow, then "
+            "(4) credible implementation partners, press releases, or procurement sources. Exclude "
+            "Apollo, ZoomInfo, BuiltWith, 6sense, social forums, aggregators, and unsourced directories "
+            "as final proof. A missing public customer story is absence of evidence, not proof of non-use."
         )
         prompt = f"""
 Research whether {company_name} is an end customer that internally uses ServiceNow.
@@ -268,6 +333,11 @@ Existing verification context: {json.dumps(existing_context, ensure_ascii=False)
 
 Separate end-customer evidence from partner, reseller, consulting, integrator, or client-delivery evidence.
 A ServiceNow partnership or implementing ServiceNow for clients NEVER proves internal customer usage.
+Validate that every finding belongs to the exact company. Do not confuse a parent, subsidiary,
+similarly named company, former employer, or partner with the target company. A current official
+company job posting that explicitly requires responsibility for its ServiceNow platform is customer
+evidence. LinkedIn evidence is valid only when ServiceNow is tied to the person's current role at
+the target company, not merely a skill, certification, former job, or old role.
 Return JSON only with this shape:
 {{"findings":[{{"url":"https://...","page_title":"...","evidence":"short factual excerpt or close paraphrase","evidence_type":"explicit_internal_usage|internal_role_or_platform_management|partner_or_service_provider|generic_reference","strength":"strong|medium|weak","category":"CUSTOMER_EVIDENCE|PARTNER_EVIDENCE|AMBIGUOUS"}}]}}
 For every finding, copy the exact URL of the search result that contains that finding's evidence.
@@ -281,7 +351,7 @@ result's URL. Do not invent URLs or evidence. Return an empty findings list when
             if getattr(self, "provider_name", "openai") == "gemini":
                 response = self.client.generate(prompt, use_google_search=True)
                 payload = _json_object(response.text)
-                source_urls = response.source_urls
+                source_urls = _expand_grounding_source_urls(response.source_urls)
             else:
                 response = self.client.responses.create(
                     model=self.model,
