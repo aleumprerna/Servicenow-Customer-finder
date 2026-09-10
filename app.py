@@ -2984,12 +2984,19 @@ def _review_companies_table(rows: list[dict[str, Any]]) -> str:
                   <p>{reason}</p>
                   <form class="company-override" method="post" action="/people/{int(row['person_id'])}/company">
                     <input type="hidden" name="run_id" value="{int(row['run_id'])}">
+                    <input type="hidden" name="resolution_source" value="">
+                    <input type="hidden" name="suggested_company_name" value="">
+                    <input type="hidden" name="suggested_company_domain" value="">
+                    <input type="hidden" name="suggested_company_linkedin_url" value="">
+                    <input type="hidden" name="suggested_headquarters" value="">
+                    <input type="hidden" name="suggested_country" value="">
+                    <input type="hidden" name="suggested_country_code" value="">
                     <label>Company name
                       <input name="company_name" value="{company if company != 'Not matched yet' else ''}" required placeholder="Enter the correct company">
                     </label>
                     <div class="review-actions">
                       <button type="button" class="button secondary ai-resolve-btn" data-person-id="{int(row['person_id'])}" data-run-id="{int(row['run_id'])}">Suggest company</button>
-                      <button class="button primary">Confirm and review</button>
+                      <button type="submit" class="button primary">Confirm and review</button>
                     </div>
                     <div class="ai-status-msg" aria-live="polite"></div>
                   </form>
@@ -3591,10 +3598,28 @@ _REDESIGN_SCRIPT = r"""
       const response = await fetch(`/api/people/${button.dataset.personId}/ai-resolve-company`, {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:params});
       const data = await response.json();
       if (!response.ok || !data.success) throw new Error(data.error || 'Could not suggest a company.');
-      if (input) input.value = data.company_name;
+      if (input) {
+        input.value = data.company_name;
+        input.dataset.suggestedCompany = data.company_name;
+      }
+      const suggestionFields = {
+        resolution_source:'ai_suggestion',
+        suggested_company_name:data.company_name || '',
+        suggested_company_domain:data.company_domain || '',
+        suggested_company_linkedin_url:data.company_linkedin_url || '',
+        suggested_headquarters:data.headquarters || '',
+        suggested_country:data.country || '',
+        suggested_country_code:data.country_code || '',
+      };
+      Object.entries(suggestionFields).forEach(([name, value]) => {
+        const field = form?.querySelector(`[name="${name}"]`);
+        if (field) field.value = value;
+      });
+      const submitButton = form?.querySelector('button[type="submit"]');
+      if (submitButton) submitButton.textContent = 'Confirm AI company';
       if (statusEl) {
         const locationText = data.location ? ` · Headquarters: ${data.location}` : '';
-        statusEl.textContent = `Suggested: ${data.company_name}${locationText}. Press Confirm and review to submit.`;
+        statusEl.textContent = `Suggested: ${data.company_name}${locationText}. Press Confirm AI company to submit.`;
         statusEl.className = 'ai-status-msg success';
       }
       button.disabled = false;
@@ -3604,6 +3629,19 @@ _REDESIGN_SCRIPT = r"""
       button.textContent = 'Suggest company';
       if (statusEl) { statusEl.textContent = error.message; statusEl.className = 'ai-status-msg error'; }
     }
+  });
+
+  document.querySelectorAll('.company-override input[name="company_name"]').forEach(input => {
+    input.addEventListener('input', () => {
+      if (!input.dataset.suggestedCompany || input.value.trim() === input.dataset.suggestedCompany) return;
+      const form = input.closest('form');
+      form?.querySelectorAll('input[name^="suggested_"], input[name="resolution_source"]').forEach(field => {
+        field.value = '';
+      });
+      const submitButton = form?.querySelector('button[type="submit"]');
+      if (submitButton) submitButton.textContent = 'Confirm and review';
+      delete input.dataset.suggestedCompany;
+    });
   });
 
   const researchMessages = [
@@ -3932,6 +3970,20 @@ def set_company_override(
 
     run_id: int = Form(...),
 
+    resolution_source: str = Form(""),
+
+    suggested_company_name: str = Form(""),
+
+    suggested_company_domain: str = Form(""),
+
+    suggested_company_linkedin_url: str = Form(""),
+
+    suggested_headquarters: str = Form(""),
+
+    suggested_country: str = Form(""),
+
+    suggested_country_code: str = Form(""),
+
 ) -> RedirectResponse:
 
     company = " ".join(company_name.split())
@@ -3966,6 +4018,14 @@ def set_company_override(
 
         raise HTTPException(status_code=404, detail="Person not found in this run")
 
+    is_ai_suggestion = (
+        resolution_source == "ai_suggestion"
+        and " ".join(suggested_company_name.split()).casefold() == company.casefold()
+        and bool(suggested_headquarters.strip())
+        and bool(suggested_country.strip())
+        and bool(suggested_country_code.strip())
+    )
+
     DATABASE.update_person_resolution(
 
         person_id,
@@ -3976,9 +4036,33 @@ def set_company_override(
 
         error="",
 
+        domain=suggested_company_domain.strip() if is_ai_suggestion else "",
+
+        company_linkedin_url=suggested_company_linkedin_url.strip() if is_ai_suggestion else "",
+
     )
 
-    DATABASE.reset_check_for_company_change(person_id, run_id, company)
+    DATABASE.reset_check_for_company_change(
+        person_id,
+        run_id,
+        company,
+        headquarters=suggested_headquarters.strip() if is_ai_suggestion else "",
+        country=suggested_country.strip() if is_ai_suggestion else "",
+        country_code=suggested_country_code.strip().upper() if is_ai_suggestion else "",
+        check_status="ai_success" if is_ai_suggestion else "pending",
+    )
+
+    if is_ai_suggestion:
+
+        DATABASE.update_run(run_id, status="enriched")
+
+        return RedirectResponse(
+
+            url=f"/?run_id={run_id}&message=AI+company+saved+without+Apollo+re-enrichment",
+
+            status_code=303,
+
+        )
 
     DATABASE.update_run(run_id, status="enriching")
 
@@ -4112,6 +4196,10 @@ def ai_resolve_company(
 
                 "company_name": company,
 
+                "company_domain": company_domain,
+
+                "company_linkedin_url": company_linkedin_url,
+
                 "headquarters": headquarters,
 
                 "country": country,
@@ -4143,6 +4231,10 @@ def ai_resolve_company(
             "success": True,
 
             "company_name": company,
+
+            "company_domain": company_domain,
+
+            "company_linkedin_url": company_linkedin_url,
 
             "headquarters": headquarters,
 

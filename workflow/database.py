@@ -210,8 +210,9 @@ class WorkflowDatabase:
         headquarters: str = "",
         country: str = "",
         country_code: str = "",
+        check_status: str = "pending",
     ) -> None:
-        """Queue only a corrected company for fresh enrichment and automation."""
+        """Reset a corrected company, optionally marking AI-enriched data as ready."""
 
         self.upsert_check(
             person_id,
@@ -222,7 +223,7 @@ class WorkflowDatabase:
                 "servicenow_matched_name": "",
                 "screenshot_path": "",
                 "match_score": "",
-                "check_status": "pending",
+                "check_status": check_status,
                 "headquarters": headquarters,
                 "country": country,
                 "country_code": country_code,

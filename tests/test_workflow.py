@@ -278,6 +278,45 @@ def test_ai_company_reset_preserves_suggested_headquarters(tmp_path: Path) -> No
     assert row["country_code"] == "DK"
 
 
+def test_confirmed_ai_suggestion_is_not_queued_for_apollo_reenrichment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = WorkflowDatabase(tmp_path / "workflow.db")
+    database.initialize()
+    run_id = database.create_run(
+        "people.csv",
+        [{"person_name": "Ada", "linkedin_url": "https://linkedin.com/in/ada"}],
+    )
+    person_id = database.people_for_run(run_id)[0]["id"]
+    database.update_person_resolution(
+        person_id,
+        company_name="AI Company",
+        status="manual_verified",
+        domain="ai.example",
+    )
+    database.reset_check_for_company_change(
+        person_id,
+        run_id,
+        "AI Company",
+        headquarters="London",
+        country="United Kingdom",
+        country_code="GB",
+        check_status="ai_success",
+    )
+    monkeypatch.setattr("workflow.service.RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(
+        "workflow.service.resolve_people",
+        lambda _database, _run_id, _settings: database.people_for_run(run_id),
+    )
+
+    input_path, _output_path, count = build_pipeline_csv(
+        database, run_id, object()  # type: ignore[arg-type]
+    )
+
+    assert count == 0
+    assert "AI Company" not in input_path.read_text(encoding="utf-8")
+
+
 def test_repeat_resolution_skips_already_trusted_companies(tmp_path: Path, monkeypatch) -> None:
     database = WorkflowDatabase(tmp_path / "workflow.db")
     database.initialize()
