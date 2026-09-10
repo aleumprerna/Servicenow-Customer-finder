@@ -37,7 +37,7 @@ class Settings(BaseModel):
     result_selectors: tuple[str, ...] = ()
     n8n_webhook_url: str | None = None
     app_base_url: str = "http://localhost:8000"
-    llm_provider: str = "kie"
+    llm_provider: str = "openai"
     kie_api_key: str | None = None
     kie_base_url: str = "https://api.kie.ai/codex/v1"
     kie_model: str = "gpt-6-astra"
@@ -52,8 +52,8 @@ class Settings(BaseModel):
     glm_model: str = "z-ai/glm-5.3"
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com/v1"
-    openai_model: str = "gpt-4o"
-    deep_research_model: str = "gpt-4o"
+    openai_model: str = "gpt-5.6-luna"
+    deep_research_model: str = "gpt-5.6-luna"
     deep_research_max_pages: int = Field(default=12, ge=1, le=40)
     deep_research_page_timeout_seconds: float = Field(default=8.0, gt=0, le=30)
     deep_research_request_timeout_seconds: float = Field(default=180.0, gt=0, le=600)
@@ -149,7 +149,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         value = file_values.get(name)
         return str(value).strip() if value is not None else os.getenv(name, default).strip()
 
-    llm_provider = dynamic_value("LLM_PROVIDER", "kie").casefold()
+    llm_provider = dynamic_value("LLM_PROVIDER", "openai").casefold()
     data: dict[str, Any] = {
         "apollo_api_key": os.getenv("APOLLO_API_KEY", "").strip(),
         "apollo_base_url": os.getenv("APOLLO_BASE_URL", "https://api.apollo.io/api/v1").strip(),
@@ -193,8 +193,8 @@ def load_settings(env_file: Path | None = None) -> Settings:
         "glm_model": dynamic_value("GLM_MODEL", "z-ai/glm-5.3"),
         "openai_api_key": dynamic_value("OPENAI_API_KEY") or _optional("OPENAI_API_KEY"),
         "openai_base_url": dynamic_value("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-        "openai_model": dynamic_value("OPENAI_MODEL", "gpt-4o"),
-        "deep_research_model": dynamic_value("DEEP_RESEARCH_MODEL", "gpt-4o"),
+        "openai_model": dynamic_value("OPENAI_MODEL", "gpt-5.6-luna"),
+        "deep_research_model": dynamic_value("DEEP_RESEARCH_MODEL", "gpt-5.6-luna"),
         "deep_research_max_pages": dynamic_value("DEEP_RESEARCH_MAX_PAGES", "12"),
         "deep_research_page_timeout_seconds": dynamic_value(
             "DEEP_RESEARCH_PAGE_TIMEOUT_SECONDS", "8"

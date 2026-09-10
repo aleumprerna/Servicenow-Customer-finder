@@ -251,7 +251,7 @@ class LLMResearchProvider:
         self,
         api_key: str,
         *,
-        model: str = "gpt-4o",
+        model: str = "gpt-5.6-luna",
         base_url: str | None = None,
         provider_name: str = "openai",
         supports_hosted_web_search: bool = True,

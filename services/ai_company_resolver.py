@@ -143,11 +143,12 @@ Return JSON only:
                 api_key=key, base_url=selected_base_url
             ).responses.create(
                 model=selected_model,
-                tools=[{"type": "web_search_preview"}],
+                tools=[{"type": "web_search"}],
+                include=["web_search_call.action.sources"],
                 input=prompt,
             )
             raw_text = getattr(response, "output_text", str(response)).strip()
-            source_urls = []
+            source_urls = _valid_source_urls_from_payload(response.model_dump())
         match = re.search(r"\{.*\}", raw_text, re.DOTALL)
         if not match:
             raise ValueError("AI returned no JSON object")
@@ -265,11 +266,12 @@ def resolve_company_from_web(
                 client = openai.OpenAI(api_key=key, base_url=selected_base_url)
                 response = client.responses.create(
                     model=selected_model,
-                    tools=[{"type": "web_search_preview"}],
+                    tools=[{"type": "web_search"}],
+                    include=["web_search_call.action.sources"],
                     input=prompt,
                 )
                 raw_text = getattr(response, "output_text", str(response)).strip()
-                source_urls = []
+                source_urls = _valid_source_urls_from_payload(response.model_dump())
             else:
                 import openai
 
@@ -303,7 +305,7 @@ def resolve_company_from_web(
                         validation_error = (
                             f"AI found {company_name}, but could not verify its headquarters and country."
                         )
-                    elif require_grounding and provider_name in {"kie", "gemini"} and not source_urls:
+                    elif require_grounding and provider_name in {"kie", "gemini", "openai"} and not source_urls:
                         validation_error = (
                             f"AI found {company_name}, but returned no supporting web source."
                         )

@@ -32,6 +32,9 @@ def test_resolve_company_from_web_openai_success() -> None:
     mock_response.output_text = (
         '{"company_name": "Harbour Energy", "confidence": "high", "reason": "Verified via LinkedIn"}'
     )
+    mock_response.model_dump.return_value = {
+        "output": [{"type": "web_search_call", "action": {"sources": []}}]
+    }
 
     mock_client = MagicMock()
     mock_client.responses.create.return_value = mock_response
@@ -44,13 +47,17 @@ def test_resolve_company_from_web_openai_success() -> None:
             api_key="sk-fake-key",
             provider="openai",
             base_url="https://api.openai.com/v1",
-            model="gpt-4o",
+            model="gpt-5.6-luna",
         )
 
     assert result["success"] is True
     assert result["company_name"] == "Harbour Energy"
     assert result["confidence"] == "high"
     assert result["source"] == "openai_web_search"
+    call = mock_client.responses.create.call_args.kwargs
+    assert call["model"] == "gpt-5.6-luna"
+    assert call["tools"] == [{"type": "web_search"}]
+    assert call["include"] == ["web_search_call.action.sources"]
 
 
 def test_resolve_company_from_web_kie_uses_responses_web_search() -> None:

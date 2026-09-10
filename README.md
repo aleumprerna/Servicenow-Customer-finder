@@ -149,17 +149,16 @@ At minimum, set:
 
 ```dotenv
 APOLLO_API_KEY=your_real_key
-LLM_PROVIDER=kie
-KIE_API_KEY=your_kie_api_key
-KIE_BASE_URL=https://api.kie.ai/codex/v1
-KIE_MODEL=gpt-6-astra
-KIE_REASONING_EFFORT=high
+LLM_PROVIDER=openai
+OPENAI_API_KEY=your_openai_api_key
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-5.6-luna
 CHROME_CDP_URL=http://localhost:9222
 INPUT_CSV=companies.csv
 OUTPUT_CSV=companies_checked.csv
 ```
 
-`LLM_PROVIDER=kie` sends all active model calls to KIE's `POST /codex/v1/responses` endpoint with `gpt-6-astra`, high reasoning effort, and its hosted web-search tool. `KIE_BASE_URL` intentionally ends at `/codex/v1` because the application appends `/responses`. KIE's streamed response events are consumed internally and exposed to the rest of the application as one completed response. Gemini, GLM, and OpenAI remain configured alternatives and can be restored by changing only `LLM_PROVIDER`.
+`LLM_PROVIDER=openai` sends all active model calls to OpenAI's Responses API with `gpt-5.6-luna` and hosted web search. KIE, Gemini, and GLM remain configured alternatives and can be restored by changing `LLM_PROVIDER` and supplying that provider's API key.
 
 Do not commit `.env`. The optional `SERVICENOW_USERNAME` and `SERVICENOW_PASSWORD` values are reserved for a possible future login flow and are not read or logged by the current workflow. `HEADLESS` is also informational because an attached browser keeps its existing mode.
 

@@ -1,14 +1,14 @@
 from config import Settings
 
 
-def test_kie_is_the_default_llm_provider() -> None:
-    settings = Settings(apollo_api_key="apollo-test", kie_api_key="kie-test")
+def test_openai_luna_is_the_default_llm_provider() -> None:
+    settings = Settings(apollo_api_key="apollo-test", openai_api_key="openai-test")
 
-    assert settings.llm_provider == "kie"
-    assert settings.llm_api_key == "kie-test"
-    assert settings.llm_base_url == "https://api.kie.ai/codex/v1"
-    assert settings.llm_model == "gpt-6-astra"
-    assert settings.llm_reasoning_effort == "high"
+    assert settings.llm_provider == "openai"
+    assert settings.llm_api_key == "openai-test"
+    assert settings.llm_base_url == "https://api.openai.com/v1"
+    assert settings.llm_model == "gpt-5.6-luna"
+    assert settings.llm_reasoning_effort is None
     assert settings.llm_supports_hosted_web_search is True
 
 
