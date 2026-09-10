@@ -3243,7 +3243,7 @@ def _simplified_results_table(rows: list[dict[str, Any]]) -> str:
         evidence_html = _result_evidence(row, evidence)
         body.append(
             f"""
-            <tr data-search="{person_name} {headline} {company} {location} {customer_label} {partner_label} {opportunity_label}">
+            <tr data-search="{person_name} {headline} {company} {location} {customer_label} {partner_label} {opportunity_label}" data-customer-no="{'true' if customer_raw == 'no' else 'false'}">
               <td><div class="contact-cell"><span class="contact-avatar" aria-label="Serial number {serial_number}">{serial_number}</span><span><strong>{_table_person_link(row)}</strong><small>{headline}</small></span></div></td>
               <td><strong>{company}</strong><small>{location}</small></td>
               <td>{_status_pill(customer_label, customer_tone)}{customer_story_link}</td>
@@ -3551,13 +3551,16 @@ _REDESIGN_SCRIPT = r"""
 
   const searchInput = document.querySelector('[data-table-search]');
   const reviewFilter = document.querySelector('[data-review-filter]');
+  const customerNoFilter = document.querySelector('[data-customer-no-filter]');
   let needsReviewOnly = false;
+  let customerNoOnly = false;
   function filterRows() {
     const query = (searchInput?.value || '').trim().toLowerCase();
     document.querySelectorAll('tbody tr[data-search]').forEach(row => {
       const matchesQuery = !query || row.dataset.search.toLowerCase().includes(query);
       const matchesReview = !needsReviewOnly || row.dataset.needsReview === 'true';
-      row.hidden = !(matchesQuery && matchesReview);
+      const matchesCustomerNo = !customerNoOnly || row.dataset.customerNo === 'true';
+      row.hidden = !(matchesQuery && matchesReview && matchesCustomerNo);
     });
   }
   searchInput?.addEventListener('input', filterRows);
@@ -3565,6 +3568,12 @@ _REDESIGN_SCRIPT = r"""
     needsReviewOnly = !needsReviewOnly;
     reviewFilter.classList.toggle('active', needsReviewOnly);
     reviewFilter.setAttribute('aria-pressed', String(needsReviewOnly));
+    filterRows();
+  });
+  customerNoFilter?.addEventListener('click', () => {
+    customerNoOnly = !customerNoOnly;
+    customerNoFilter.classList.toggle('active', customerNoOnly);
+    customerNoFilter.setAttribute('aria-pressed', String(customerNoOnly));
     filterRows();
   });
 
@@ -3624,6 +3633,21 @@ _REDESIGN_SCRIPT = r"""
   }
 
   document.addEventListener('click', async event => {
+    const bulkButton = event.target.closest('[data-bulk-deep-research]');
+    if (bulkButton && !bulkButton.disabled) {
+      const buttons = [...document.querySelectorAll('tr[data-customer-no="true"] .deep-research-btn:not(:disabled)')];
+      if (!buttons.length) return;
+      const noun = buttons.length === 1 ? 'record' : 'records';
+      if (!window.confirm(`Run Deep Research for ${buttons.length} ServiceNow non-customer ${noun}?`)) return;
+      bulkButton.disabled = true;
+      for (let index = 0; index < buttons.length; index += 1) {
+        bulkButton.textContent = `Starting ${index + 1} of ${buttons.length}...`;
+        buttons[index].click();
+        await new Promise(resolve => window.setTimeout(resolve, 120));
+      }
+      bulkButton.textContent = 'Deep Research started';
+      return;
+    }
     const button = event.target.closest('.deep-research-btn');
     if (!button || button.disabled) return;
     const cell = button.closest('.deep-research-cell');
@@ -3681,6 +3705,7 @@ def _page(request: Request, selected_run: int | None = None) -> str:
         for row in rows
     ]
     verified_count = sum(str(row.get("servicenow_customer") or "").casefold() == "yes" for row in rows)
+    non_customer_count = sum(str(row.get("servicenow_customer") or "").casefold() == "no" for row in rows)
     partner_count = sum("partner" in relationship.casefold() for relationship in relationships)
     opportunity_count = sum(_relationship_tone(relationship) == "positive" for relationship in relationships)
     enriched_count, automation_count, approved_count = _workflow_counts(rows)
@@ -3799,8 +3824,8 @@ def _page(request: Request, selected_run: int | None = None) -> str:
         main_surface = f"""
           <section class="work-surface">
             <div class="result-intro"><span class="complete-icon" aria-hidden="true">✓</span><div><h2>Verification complete</h2><p>Your results are ready to review and share.</p></div></div>
-            <header class="surface-header"><div><h2>Results</h2><p>Customer, partner, and opportunity status for every contact.</p></div><div class="surface-actions"><a class="button primary" href="/reports.csv?run_id={selected_run}">Download CSV</a></div></header>
-            <div class="table-tools"><label class="search-wrap"><span class="sr-only">Search results</span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="m16 16 4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><input class="search-input" data-table-search placeholder="Search results…"></label></div>
+            <header class="surface-header"><div><h2>Results</h2><p>Customer, partner, and opportunity status for every contact.</p></div><div class="surface-actions">{f'<button type="button" data-bulk-deep-research>Deep Research all No ({non_customer_count})</button>' if non_customer_count else ''}<a class="button primary" href="/reports.csv?run_id={selected_run}">Download CSV</a></div></header>
+            <div class="table-tools"><label class="search-wrap"><span class="sr-only">Search results</span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="m16 16 4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><input class="search-input" data-table-search placeholder="Search results…"></label>{f'<button type="button" class="filter-button" data-customer-no-filter aria-pressed="false">ServiceNow customer: No ({non_customer_count})</button>' if non_customer_count else '<span></span>'}</div>
             {_simplified_results_table(rows)}
             <footer class="surface-footer"><span>{len(rows)} contacts verified</span><a class="button primary" href="/reports.csv?run_id={selected_run}">Download CSV</a></footer>
           </section>"""

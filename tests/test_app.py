@@ -117,6 +117,37 @@ def test_people_tables_use_serial_numbers_instead_of_initials() -> None:
         assert 'class="contact-avatar" aria-hidden="true"' not in html
 
 
+def test_results_offer_bulk_research_and_one_no_customer_filter(monkeypatch) -> None:
+    row = _row("apollo_structurally_verified")
+    row.update({"check_status": "completed", "servicenow_customer": "No"})
+
+    class Database:
+        def summary(self):
+            return [{"id": 7, "status": "completed", "people_count": 1}]
+
+        def report_rows(self, run_id):
+            assert run_id == 7
+            return [row]
+
+        def run(self, run_id):
+            assert run_id == 7
+            return {"id": 7, "status": "completed", "source_file": "customers.csv"}
+
+    monkeypatch.setattr(dashboard, "DATABASE", Database())
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/", "query_string": b"", "headers": []}
+    )
+
+    html = _page(request, 7)
+
+    assert 'data-bulk-deep-research' in html
+    assert "Deep Research all No (1)" in html
+    assert html.count('data-customer-no-filter') == 2  # control plus its script binding
+    assert "ServiceNow customer: No (1)" in html
+    assert 'data-customer-no="true"' in html
+    assert "window.confirm" in html
+
+
 def test_final_table_expands_the_whole_record_and_uses_n8n_citations() -> None:
     row = _row("apollo_structurally_verified")
     row.update(
