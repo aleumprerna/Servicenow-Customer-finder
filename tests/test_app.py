@@ -480,6 +480,8 @@ def test_ai_company_suggestion_does_not_save_until_confirmed(monkeypatch) -> Non
 
     assert payload["approved"] is False
     assert payload["company_name"] == "Suggested Company"
+    assert payload["company_domain"] == ""
+    assert payload["company_linkedin_url"] == ""
 
 
 def test_confirming_company_queues_review_automatically(monkeypatch) -> None:
@@ -492,8 +494,8 @@ def test_confirming_company_queues_review_automatically(monkeypatch) -> None:
         def update_person_resolution(self, person_id, **values):
             updates.append(("person", person_id, values))
 
-        def reset_check_for_company_change(self, person_id, run_id, company):
-            updates.append(("check", person_id, run_id, company))
+        def reset_check_for_company_change(self, person_id, run_id, company, **values):
+            updates.append(("check", person_id, run_id, company, values))
 
         def update_run(self, run_id, **values):
             updates.append(("run", run_id, values))
@@ -508,6 +510,67 @@ def test_confirming_company_queues_review_automatically(monkeypatch) -> None:
     assert len(tasks.tasks) == 1
     assert tasks.tasks[0].func is dashboard.run_enrichment
     assert tasks.tasks[0].args == (dashboard.DATABASE, 3)
+
+
+def test_confirming_ai_suggestion_keeps_ai_data_and_skips_apollo(monkeypatch) -> None:
+    updates = []
+
+    class Database:
+        def report_rows(self, _run_id):
+            return [{"person_id": 10}]
+
+        def update_person_resolution(self, person_id, **values):
+            updates.append(("person", person_id, values))
+
+        def reset_check_for_company_change(self, person_id, run_id, company, **values):
+            updates.append(("check", person_id, run_id, company, values))
+
+        def update_run(self, run_id, **values):
+            updates.append(("run", run_id, values))
+
+    monkeypatch.setattr(dashboard, "DATABASE", Database())
+    tasks = BackgroundTasks()
+
+    response = dashboard.set_company_override(
+        10,
+        tasks,
+        "AI Company",
+        3,
+        "ai_suggestion",
+        "AI Company",
+        "ai.example",
+        "https://linkedin.com/company/ai-company",
+        "London",
+        "United Kingdom",
+        "gb",
+    )
+
+    assert response.status_code == 303
+    assert len(tasks.tasks) == 0
+    assert (
+        "person",
+        10,
+        {
+            "company_name": "AI Company",
+            "status": "manual_verified",
+            "error": "",
+            "domain": "ai.example",
+            "company_linkedin_url": "https://linkedin.com/company/ai-company",
+        },
+    ) in updates
+    assert (
+        "check",
+        10,
+        3,
+        "AI Company",
+        {
+            "headquarters": "London",
+            "country": "United Kingdom",
+            "country_code": "GB",
+            "check_status": "ai_success",
+        },
+    ) in updates
+    assert ("run", 3, {"status": "enriched"}) in updates
 
 
 def test_upload_queues_company_review_automatically(monkeypatch) -> None:
@@ -572,8 +635,19 @@ def test_suggest_company_script_waits_for_confirmation() -> None:
 
     assert "auto_approve:'false'" in script
     assert "auto_approve:'true'" not in script
-    assert "Press Confirm and review to submit." in script
+    assert "Press Confirm AI company to submit." in script
     assert "window.setTimeout(() => window.location.reload(), 650)" not in script
+    assert "suggested_company_domain:data.company_domain" in script
+    assert "suggested_headquarters:data.headquarters" in script
+
+
+def test_company_review_form_tracks_ai_suggestion_metadata() -> None:
+    html = dashboard._review_companies_table([_row("unresolved")])
+
+    assert 'name="resolution_source"' in html
+    assert 'name="suggested_company_name"' in html
+    assert 'name="suggested_company_domain"' in html
+    assert 'name="suggested_headquarters"' in html
 
 
 def test_company_review_turns_proxy_failure_into_actionable_copy() -> None:
