@@ -1,7 +1,10 @@
+import asyncio
 import json
+from io import BytesIO
 from pathlib import Path
 
 from fastapi import BackgroundTasks
+from starlette.datastructures import UploadFile
 from starlette.requests import Request
 
 import app as dashboard
@@ -93,6 +96,25 @@ def test_stage_tables_show_distinct_workflow_data() -> None:
     assert "ServiceNow customer" in automation
     assert "Final status" in final
     assert "n8n delivery" in final
+
+
+def test_people_tables_use_serial_numbers_instead_of_initials() -> None:
+    first = _row("apollo_structurally_verified")
+    second = _row("apollo_structurally_verified")
+    second.update({"person_id": 2, "person_name": "Second Contact"})
+
+    tables = (
+        _enrichment_table([first, second]),
+        _automation_table([first, second]),
+        _final_results_table([first, second]),
+        dashboard._review_companies_table([first, second]),
+        dashboard._simplified_results_table([first, second]),
+    )
+
+    for html in tables:
+        assert 'aria-label="Serial number 1">1<' in html
+        assert 'aria-label="Serial number 2">2<' in html
+        assert 'class="contact-avatar" aria-hidden="true"' not in html
 
 
 def test_final_table_expands_the_whole_record_and_uses_n8n_citations() -> None:
@@ -189,6 +211,7 @@ def test_page_renders_progress_steps_and_three_record_tabs(monkeypatch) -> None:
     assert 'class="async-stage-form"' in html
     assert 'class="stage-progress"' in html
     assert '<meta http-equiv="refresh"' not in html
+    assert html.count(">Verify Customers</button>") == 1
     enriched_button = html.split('id="tab-enriched"', 1)[0].rsplit("<button", 1)[1]
     assert "tab-button active" in enriched_button
 
@@ -420,6 +443,101 @@ def test_ai_resolve_company_endpoint_person_not_found(monkeypatch) -> None:
     assert payload["success"] is False
 
 
+def test_ai_company_suggestion_does_not_save_until_confirmed(monkeypatch) -> None:
+    class Database:
+        def person(self, _person_id):
+            return {
+                "id": 10,
+                "run_id": 3,
+                "person_name": "Example Person",
+                "linkedin_url": "https://linkedin.com/in/example",
+                "headline": "Leader at Suggested Company",
+            }
+
+        def update_person_resolution(self, *_args, **_kwargs):
+            raise AssertionError("A suggestion must not update the person")
+
+        def reset_check_for_company_change(self, *_args, **_kwargs):
+            raise AssertionError("A suggestion must not reset verification")
+
+        def update_run(self, *_args, **_kwargs):
+            raise AssertionError("A suggestion must not update the run")
+
+    monkeypatch.setattr(dashboard, "DATABASE", Database())
+    monkeypatch.setattr(
+        dashboard,
+        "resolve_company_from_web",
+        lambda **_kwargs: {
+            "success": True,
+            "company_name": "Suggested Company",
+            "headquarters": "London",
+            "country": "United Kingdom",
+        },
+    )
+
+    response = dashboard.ai_resolve_company(10, run_id=3, auto_approve=False)
+    payload = json.loads(response.body)
+
+    assert payload["approved"] is False
+    assert payload["company_name"] == "Suggested Company"
+
+
+def test_confirming_company_queues_review_automatically(monkeypatch) -> None:
+    updates = []
+
+    class Database:
+        def report_rows(self, _run_id):
+            return [{"person_id": 10}]
+
+        def update_person_resolution(self, person_id, **values):
+            updates.append(("person", person_id, values))
+
+        def reset_check_for_company_change(self, person_id, run_id, company):
+            updates.append(("check", person_id, run_id, company))
+
+        def update_run(self, run_id, **values):
+            updates.append(("run", run_id, values))
+
+    monkeypatch.setattr(dashboard, "DATABASE", Database())
+    tasks = BackgroundTasks()
+
+    response = dashboard.set_company_override(10, tasks, "Correct Company", 3)
+
+    assert response.status_code == 303
+    assert ("run", 3, {"status": "enriching"}) in updates
+    assert len(tasks.tasks) == 1
+    assert tasks.tasks[0].func is dashboard.run_enrichment
+    assert tasks.tasks[0].args == (dashboard.DATABASE, 3)
+
+
+def test_upload_queues_company_review_automatically(monkeypatch) -> None:
+    updates = []
+
+    class Database:
+        def create_run(self, source_file, people):
+            assert source_file == "companies.csv"
+            assert list(people)[0]["company_name"] == "Example Company"
+            return 7
+
+        def update_run(self, run_id, **values):
+            updates.append((run_id, values))
+
+    monkeypatch.setattr(dashboard, "DATABASE", Database())
+    tasks = BackgroundTasks()
+    upload = UploadFile(
+        filename="companies.csv",
+        file=BytesIO(b"company_name\nExample Company\n"),
+    )
+
+    response = asyncio.run(dashboard.upload_csv(tasks, upload))
+
+    assert response.status_code == 303
+    assert updates == [(7, {"status": "enriching"})]
+    assert len(tasks.tasks) == 1
+    assert tasks.tasks[0].func is dashboard.run_enrichment
+    assert tasks.tasks[0].args == (dashboard.DATABASE, 7)
+
+
 def test_review_companies_endpoint_marks_run_busy_and_queues_enrichment(monkeypatch) -> None:
     updates = []
 
@@ -447,6 +565,15 @@ def test_review_companies_script_waits_for_start_response_before_reload() -> Non
     assert "const response = await fetch(form.action" in script
     assert "if (!response.ok)" in script
     assert "window.setTimeout(() => window.location.reload(), 350)" not in script
+
+
+def test_suggest_company_script_waits_for_confirmation() -> None:
+    script = dashboard._REDESIGN_SCRIPT
+
+    assert "auto_approve:'false'" in script
+    assert "auto_approve:'true'" not in script
+    assert "Press Confirm and review to submit." in script
+    assert "window.setTimeout(() => window.location.reload(), 650)" not in script
 
 
 def test_company_review_turns_proxy_failure_into_actionable_copy() -> None:

@@ -713,15 +713,6 @@ def _report_card(row: dict[str, Any]) -> str:
 
 
 
-def _avatar_initials(name: str) -> str:
-    parts = [p for p in name.strip().split() if p]
-    if len(parts) >= 2:
-        return f"{parts[0][0]}{parts[1][0]}".upper()
-    elif parts:
-        return parts[0][:2].upper()
-    return "—"
-
-
 def _table_person_link(row: dict[str, Any]) -> str:
     person = _escape(row.get("person_name")) or "Unnamed prospect"
     linkedin = _escape(row.get("linkedin_url"))
@@ -739,7 +730,7 @@ def _status_pill(label: str, tone: str = "neutral") -> str:
 
 def _enrichment_table(rows: list[dict[str, Any]]) -> str:
     body: list[str] = []
-    for row in rows:
+    for serial_number, row in enumerate(rows, start=1):
         trusted = str(row.get("resolution_status") or "") in TRUSTED_COMPANY_STATUSES
         approval = _status_pill("Ready", "success") if trusted else _status_pill("Needs approval", "warning")
         company = _escape(row.get("company_name")) or "Company unresolved"
@@ -770,13 +761,12 @@ def _enrichment_table(rows: list[dict[str, Any]]) -> str:
         headline_html = f'<span class="cell-secondary">{headline}</span>' if headline else ''
         apollo_company = _escape(row.get("apollo_company_name"))
         apollo_html = f'<span class="cell-secondary">{apollo_company}</span>' if apollo_company else ''
-        initials = _avatar_initials(person_name)
         body.append(
             f"""
             <tr class="table-row">
               <td>
                 <div class="prospect-profile">
-                  <div class="prospect-avatar" aria-hidden="true">{initials}</div>
+                  <div class="prospect-avatar" aria-label="Serial number {serial_number}">{serial_number}</div>
                   <div class="prospect-info">
                     {_table_person_link(row)}
                     {headline_html}
@@ -806,7 +796,7 @@ def _automation_table(rows: list[dict[str, Any]]) -> str:
         "manual_review": ("Manual review", "warning"),
         "error": ("Error", "danger"),
     }
-    for row in rows:
+    for serial_number, row in enumerate(rows, start=1):
         raw_status = str(row.get("check_status") or "")
         label, tone = status_labels.get(raw_status, ("Waiting for enrichment", "neutral"))
         customer = str(row.get("servicenow_customer") or "")
@@ -824,14 +814,13 @@ def _automation_table(rows: list[dict[str, Any]]) -> str:
         error_html = f'<span class="cell-error">{error}</span>' if error else ""
         person_name = _escape(row.get("person_name")) or "Unnamed prospect"
         company = _escape(row.get("company_name")) or "Company unresolved"
-        initials = _avatar_initials(person_name)
         checked_time = _escape(row.get("checked_at")) or "Pending"
         body.append(
             f"""
             <tr class="table-row">
               <td>
                 <div class="prospect-profile">
-                  <div class="prospect-avatar" aria-hidden="true">{initials}</div>
+                  <div class="prospect-avatar" aria-label="Serial number {serial_number}">{serial_number}</div>
                   <div class="prospect-info">
                     {_table_person_link(row)}
                     <span class="cell-secondary">{company}</span>
@@ -856,7 +845,7 @@ def _automation_table(rows: list[dict[str, Any]]) -> str:
 
 def _final_results_table(rows: list[dict[str, Any]]) -> str:
     records: list[str] = []
-    for row in rows:
+    for serial_number, row in enumerate(rows, start=1):
         evidence = parse_n8n_evidence(
             str(row.get("n8n_status") or ""), str(row.get("n8n_response") or "")
         )
@@ -911,14 +900,13 @@ def _final_results_table(rows: list[dict[str, Any]]) -> str:
         )
         person_name = _escape(row.get("person_name")) or "Unnamed prospect"
         company = _escape(row.get("company_name")) or "Company unresolved"
-        initials = _avatar_initials(person_name)
         records.append(
             f"""
             <details class="final-record">
               <summary class="final-record-summary">
                 <div class="final-cell record-person">
                   <div class="prospect-profile">
-                    <div class="prospect-avatar" aria-hidden="true">{initials}</div>
+                    <div class="prospect-avatar" aria-label="Serial number {serial_number}">{serial_number}</div>
                     <div class="prospect-info">
                       {_table_person_link(row)}
                       <span class="cell-secondary">{company}</span>
@@ -2861,7 +2849,7 @@ def _legacy_page(request: Request, selected_run: int | None = None) -> str:
 
             if (runId) formData.append('run_id', runId);
 
-            formData.append('auto_approve', 'true');
+            formData.append('auto_approve', 'false');
 
 
 
@@ -2901,35 +2889,17 @@ def _legacy_page(request: Request, selected_run: int | None = None) -> str:
 
               statusEl.className = 'ai-status-msg success';
 
-              statusEl.textContent = `✨ Found: ${{data.company_name}} (Approved)`;
+              statusEl.textContent = `✨ Suggested: ${{data.company_name}}. Submit the form to confirm and review it.`;
 
             }}
 
 
 
-            button.innerHTML = '<span>✓ Approved</span>';
+            button.disabled = false;
 
+            button.classList.remove('loading');
 
-
-            window.setTimeout(async () => {{
-
-              if (runId && typeof refreshWorkspace === 'function') {{
-
-                await refreshWorkspace(runId);
-
-                if (typeof pollProgress === 'function') pollProgress();
-
-              }} else if (form) {{
-
-                form.submit();
-
-              }} else {{
-
-                location.reload();
-
-              }}
-
-            }}, 650);
+            button.innerHTML = originalContent;
 
 
 
@@ -2989,7 +2959,7 @@ def _review_companies_table(rows: list[dict[str, Any]]) -> str:
     """
 
     body: list[str] = []
-    for row in rows:
+    for serial_number, row in enumerate(rows, start=1):
         trusted = str(row.get("resolution_status") or "") in TRUSTED_COMPANY_STATUSES
         person_name = _escape(row.get("person_name")) or "Unnamed contact"
         headline = _escape(row.get("headline")) or "Job title not provided"
@@ -3019,7 +2989,7 @@ def _review_companies_table(rows: list[dict[str, Any]]) -> str:
                     </label>
                     <div class="review-actions">
                       <button type="button" class="button secondary ai-resolve-btn" data-person-id="{int(row['person_id'])}" data-run-id="{int(row['run_id'])}">Suggest company</button>
-                      <button class="button primary">Confirm company</button>
+                      <button class="button primary">Confirm and review</button>
                     </div>
                     <div class="ai-status-msg" aria-live="polite"></div>
                   </form>
@@ -3029,7 +2999,7 @@ def _review_companies_table(rows: list[dict[str, Any]]) -> str:
         body.append(
             f"""
             <tr data-review-row data-needs-review="{str(not trusted).lower()}" data-search="{person_name} {headline} {company} {location}">
-              <td><div class="contact-cell"><span class="contact-avatar" aria-hidden="true">{_avatar_initials(str(row.get('person_name') or ''))}</span><span><strong>{_table_person_link(row)}</strong><small>{headline}</small></span></div></td>
+              <td><div class="contact-cell"><span class="contact-avatar" aria-label="Serial number {serial_number}">{serial_number}</span><span><strong>{_table_person_link(row)}</strong><small>{headline}</small></span></div></td>
               <td><strong>{company}</strong></td>
               <td>{location}</td>
               <td>{status}</td>
@@ -3567,17 +3537,18 @@ _REDESIGN_SCRIPT = r"""
     button.textContent = 'Finding…';
     if (statusEl) statusEl.textContent = 'Looking for the most likely company…';
     try {
-      const params = new URLSearchParams({run_id:button.dataset.runId,auto_approve:'true'});
+      const params = new URLSearchParams({run_id:button.dataset.runId,auto_approve:'false'});
       const response = await fetch(`/api/people/${button.dataset.personId}/ai-resolve-company`, {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:params});
       const data = await response.json();
       if (!response.ok || !data.success) throw new Error(data.error || 'Could not suggest a company.');
       if (input) input.value = data.company_name;
       if (statusEl) {
         const locationText = data.location ? ` · Headquarters: ${data.location}` : '';
-        statusEl.textContent = `Suggested and confirmed: ${data.company_name}${locationText}`;
+        statusEl.textContent = `Suggested: ${data.company_name}${locationText}. Press Confirm and review to submit.`;
         statusEl.className = 'ai-status-msg success';
       }
-      window.setTimeout(() => window.location.reload(), 650);
+      button.disabled = false;
+      button.textContent = 'Suggest again';
     } catch (error) {
       button.disabled = false;
       button.textContent = 'Suggest company';
@@ -3781,7 +3752,7 @@ def _page(request: Request, selected_run: int | None = None) -> str:
             <header class="surface-header"><div><h2>Ready to verify {enriched_count} companies</h2><p>Check which companies are verified ServiceNow customers.</p></div><div class="surface-actions"><form method="post" action="/runs/{selected_run}/launch-browser"><button class="primary">Verify Customers</button></form></div></header>
             <div class="table-tools"><label class="search-wrap"><span class="sr-only">Search contacts or companies</span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="m16 16 4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><input class="search-input" data-table-search placeholder="Search contacts or companies…"></label>{f'<button type="button" class="filter-button" data-review-filter aria-pressed="false">{unresolved} need review</button>' if unresolved else '<span></span>'}</div>
             {_review_companies_table(rows)}
-            <footer class="surface-footer"><span>{enriched_count} companies ready to verify</span><form method="post" action="/runs/{selected_run}/launch-browser"><button class="primary">Verify Customers</button></form></footer>
+            <footer class="surface-footer"><span>{enriched_count} companies ready to verify</span></footer>
           </section>"""
     else:
         main_surface = f"""
@@ -3839,7 +3810,10 @@ def home(request: Request, run_id: int | None = None) -> HTMLResponse:
 
 @app.post("/runs")
 
-async def upload_csv(file: UploadFile = File(...)) -> RedirectResponse:
+async def upload_csv(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+) -> RedirectResponse:
 
     if not (file.filename or "").lower().endswith(".csv"):
 
@@ -3851,11 +3825,18 @@ async def upload_csv(file: UploadFile = File(...)) -> RedirectResponse:
 
         run_id = DATABASE.create_run(file.filename or "uploaded.csv", people)
 
+        DATABASE.update_run(run_id, status="enriching")
+
+        background_tasks.add_task(run_enrichment, DATABASE, run_id)
+
     except ValueError as exc:
 
         return RedirectResponse(url=f"/?kind=error&message={str(exc).replace(' ', '+')}", status_code=303)
 
-    return RedirectResponse(url=f"/?run_id={run_id}&message=CSV+uploaded", status_code=303)
+    return RedirectResponse(
+        url=f"/?run_id={run_id}&message=CSV+uploaded.+Company+review+started",
+        status_code=303,
+    )
 
 
 
@@ -3878,6 +3859,8 @@ def clear_database() -> RedirectResponse:
 def set_company_override(
 
     person_id: int,
+
+    background_tasks: BackgroundTasks,
 
     company_name: str = Form(...),
 
@@ -3931,11 +3914,13 @@ def set_company_override(
 
     DATABASE.reset_check_for_company_change(person_id, run_id, company)
 
-    DATABASE.update_run(run_id, status="needs_enrichment")
+    DATABASE.update_run(run_id, status="enriching")
+
+    background_tasks.add_task(run_enrichment, DATABASE, run_id)
 
     return RedirectResponse(
 
-        url=f"/?run_id={run_id}&message=Company+override+saved",
+        url=f"/?run_id={run_id}&message=Company+saved.+Review+started",
 
         status_code=303,
 
@@ -3953,7 +3938,7 @@ def ai_resolve_company(
 
     run_id: int | None = Form(None),
 
-    auto_approve: bool = Form(True),
+    auto_approve: bool = Form(False),
 
 ) -> JSONResponse:
 
