@@ -6,7 +6,7 @@ import re
 import socket
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Callable, Iterable
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -127,6 +127,7 @@ class CrawlReport:
     findings: list[EvidenceFinding]
     sources_checked: int
     discovered_urls: list[str]
+    visited_urls: list[str] = field(default_factory=list)
 
 
 class BoundedOfficialCrawler:
@@ -209,6 +210,7 @@ class BoundedOfficialCrawler:
         queue: deque[str] = deque(seeds)
         queued = {_canonical_url(item) for item in seeds}
         visited: set[str] = set()
+        visited_urls: list[str] = []
         findings: list[EvidenceFinding] = []
         discovered: list[str] = []
         analyzed_pages = 0
@@ -222,6 +224,7 @@ class BoundedOfficialCrawler:
             if url in visited or not is_same_site(url, domain):
                 continue
             visited.add(url)
+            visited_urls.append(url)
             try:
                 response = self._get(url, domain)
                 with response:
@@ -286,4 +289,9 @@ class BoundedOfficialCrawler:
             analyzed_pages,
             len(findings),
         )
-        return CrawlReport(findings=findings, sources_checked=len(visited), discovered_urls=discovered)
+        return CrawlReport(
+            findings=findings,
+            sources_checked=len(visited),
+            discovered_urls=discovered,
+            visited_urls=visited_urls,
+        )

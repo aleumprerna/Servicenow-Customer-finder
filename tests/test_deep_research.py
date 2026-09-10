@@ -601,16 +601,20 @@ def test_research_result_is_persisted_and_reused_from_cache(tmp_path) -> None:
         official_domain="example.com",
     )
 
-    result = _result_for("We use ServiceNow internally for IT service management.")
+    result = _result_for("We use ServiceNow internally for IT service management.").model_copy(
+        update={"visited_urls": ["https://example.com/", "https://example.com/technology"]}
+    )
     database.complete_deep_research(person_id, result.as_storage_values())
 
     stored = database.deep_research(person_id)
     assert stored is not None
     assert stored["classification_status"] == "CONFIRMED_CUSTOMER"
     assert stored["customer_evidence"][0]["official_source"] is True
+    assert stored["visited_urls"] == ["https://example.com/", "https://example.com/technology"]
     assert database.deep_research_is_fresh(person_id, cache_days=30)
     report_row = database.report_rows(run_id)[0]
     assert json.loads(report_row["dr_customer_evidence"])[0]["strength"] == "strong"
+    assert json.loads(report_row["dr_visited_urls"])[1] == "https://example.com/technology"
 
     database.update_person_resolution(
         person_id,
@@ -884,3 +888,76 @@ def test_result_ui_does_not_link_legacy_ungrounded_citation() -> None:
 
     assert 'href="https://example.com/invented"' not in html
     assert "Citation not verified; run research again." in html
+
+
+def test_deep_research_collects_every_visited_website() -> None:
+    class Crawler:
+        def crawl(self, _domain):
+            return CrawlReport(
+                findings=[],
+                sources_checked=1,
+                discovered_urls=[],
+                visited_urls=["https://example.com/"],
+            )
+
+    class Provider:
+        model = "test-model"
+        provider_label = "test:test-model"
+
+        def discover(self, *, official_only, **_kwargs):
+            return SimpleNamespace(
+                findings=[],
+                source_urls={
+                    "https://example.com/careers"
+                    if official_only
+                    else "https://jobs.example.net/example"
+                },
+            )
+
+        def suggest_classification(self, **_kwargs):
+            return None
+
+    class Verifier:
+        def check(self, _company_name, _discovered_urls):
+            return SimpleNamespace(
+                found=False,
+                url="",
+                checked_urls=("https://www.servicenow.com/customers/example.html",),
+            )
+
+    result = DeepResearchService(
+        provider=Provider(),
+        crawler=Crawler(),
+        customer_page_verifier=Verifier(),
+    ).research(company_name="Example Company", official_domain="example.com")
+
+    assert result.visited_urls == [
+        "https://example.com/",
+        "https://example.com/careers",
+        "https://jobs.example.net/example",
+        "https://www.servicenow.com/customers/example.html",
+    ]
+
+
+def test_zero_confidence_research_popup_still_shows_visit_logs() -> None:
+    row = {
+        "person_id": 1,
+        "company_name": "Example Company",
+        "company_domain": "example.com",
+        "dr_request_status": "completed",
+        "dr_classification_status": "NO_OFFICIAL_EVIDENCE",
+        "dr_confidence": 0,
+        "dr_researched_at": "2026-09-10T00:00:00+00:00",
+        "dr_visited_urls": json.dumps(
+            ["https://example.com/", "https://www.servicenow.com/customers/example.html"]
+        ),
+    }
+
+    html = dashboard._deep_research_cell(row)
+
+    assert "0% confidence" in html
+    assert "Research logs" in html
+    assert "View logs" in html
+    assert "2 websites visited" in html
+    assert 'href="https://example.com/"' in html
+    assert 'href="https://www.servicenow.com/customers/example.html"' in html

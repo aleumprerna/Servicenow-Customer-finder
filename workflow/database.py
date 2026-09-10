@@ -86,6 +86,7 @@ class WorkflowDatabase:
                     customer_evidence TEXT NOT NULL DEFAULT '[]',
                     partner_evidence TEXT NOT NULL DEFAULT '[]',
                     ambiguous_evidence TEXT NOT NULL DEFAULT '[]',
+                    visited_urls TEXT NOT NULL DEFAULT '[]',
                     sources_checked INTEGER NOT NULL DEFAULT 0,
                     relevant_sources INTEGER NOT NULL DEFAULT 0,
                     research_depth TEXT NOT NULL DEFAULT 'deep',
@@ -112,6 +113,10 @@ class WorkflowDatabase:
             self._ensure_column(
                 conn, "deep_research_results", "servicenow_customer_page_url",
                 "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                conn, "deep_research_results", "visited_urls",
+                "TEXT NOT NULL DEFAULT '[]'",
             )
             stale_cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
             conn.execute(
@@ -295,10 +300,11 @@ class WorkflowDatabase:
                    d.classification_status AS dr_classification_status,
                    d.confidence AS dr_confidence,
                    d.summary AS dr_summary,
-                   d.customer_evidence AS dr_customer_evidence,
-                   d.partner_evidence AS dr_partner_evidence,
-                   d.ambiguous_evidence AS dr_ambiguous_evidence,
-                   d.sources_checked AS dr_sources_checked,
+                    d.customer_evidence AS dr_customer_evidence,
+                    d.partner_evidence AS dr_partner_evidence,
+                    d.ambiguous_evidence AS dr_ambiguous_evidence,
+                    d.visited_urls AS dr_visited_urls,
+                    d.sources_checked AS dr_sources_checked,
                    d.relevant_sources AS dr_relevant_sources,
                    d.research_depth AS dr_research_depth,
                    d.model_provider AS dr_model_provider,
@@ -324,7 +330,7 @@ class WorkflowDatabase:
         if row is None:
             return None
         record = dict(row)
-        for key in ("customer_evidence", "partner_evidence", "ambiguous_evidence"):
+        for key in ("customer_evidence", "partner_evidence", "ambiguous_evidence", "visited_urls"):
             try:
                 parsed = json.loads(record.get(key) or "[]")
                 record[key] = parsed if isinstance(parsed, list) else []
@@ -411,7 +417,7 @@ class WorkflowDatabase:
                 """UPDATE deep_research_results SET
                     request_status = 'completed', classification_status = ?, confidence = ?,
                     summary = ?, customer_evidence = ?, partner_evidence = ?,
-                    ambiguous_evidence = ?, sources_checked = ?, relevant_sources = ?,
+                    ambiguous_evidence = ?, visited_urls = ?, sources_checked = ?, relevant_sources = ?,
                     research_depth = ?, model_provider = ?,
                     servicenow_customer_page_found = ?, servicenow_customer_page_url = ?,
                     researched_at = ?,
@@ -424,6 +430,7 @@ class WorkflowDatabase:
                     json.dumps(values.get("customer_evidence") or [], ensure_ascii=False),
                     json.dumps(values.get("partner_evidence") or [], ensure_ascii=False),
                     json.dumps(values.get("ambiguous_evidence") or [], ensure_ascii=False),
+                    json.dumps(values.get("visited_urls") or [], ensure_ascii=False),
                     int(values.get("sources_checked") or 0),
                     int(values.get("relevant_sources") or 0),
                     str(values.get("research_depth") or "deep"),

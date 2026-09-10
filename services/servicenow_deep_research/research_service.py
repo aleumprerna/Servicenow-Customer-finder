@@ -512,6 +512,7 @@ class DeepResearchService:
 
         context = dict(existing_context or {})
         findings = list(crawl_report.findings)
+        visited_urls = list(dict.fromkeys(crawl_report.visited_urls))
         directory_finding = servicenow_directory_finding(company, context)
         if directory_finding is not None:
             findings.append(directory_finding)
@@ -535,6 +536,7 @@ class DeepResearchService:
             )
             findings.extend(official_discovery.findings)
             discovered_source_urls.update(official_discovery.source_urls)
+            visited_urls.extend(sorted(official_discovery.source_urls))
             sources_checked += len(official_discovery.source_urls)
         except ResearchProviderError as exc:
             provider_failed = exc
@@ -555,6 +557,7 @@ class DeepResearchService:
                 )
                 sources_checked += len(external.source_urls)
                 discovered_source_urls.update(external.source_urls)
+                visited_urls.extend(sorted(external.source_urls))
                 findings.extend(external.findings)
             except ResearchProviderError as exc:
                 provider_failed = provider_failed or exc
@@ -565,6 +568,7 @@ class DeepResearchService:
         if self.customer_page_verifier is not None:
             customer_page_check = self.customer_page_verifier.check(company, discovered_source_urls)
             sources_checked += len(customer_page_check.checked_urls)
+            visited_urls.extend(customer_page_check.checked_urls)
             if customer_page_check.found is True:
                 findings.append(
                     EvidenceFinding(
@@ -604,6 +608,7 @@ class DeepResearchService:
             ),
             suggestion=suggestion,
         )
+        result = result.model_copy(update={"visited_urls": list(dict.fromkeys(visited_urls))})
         if customer_page_check is not None:
             result = result.model_copy(
                 update={

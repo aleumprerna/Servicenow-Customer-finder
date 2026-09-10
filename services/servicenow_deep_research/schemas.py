@@ -78,6 +78,7 @@ class DeepResearchResult(BaseModel):
     customer_evidence: list[EvidenceFinding] = Field(default_factory=list)
     partner_evidence: list[EvidenceFinding] = Field(default_factory=list)
     ambiguous_evidence: list[EvidenceFinding] = Field(default_factory=list)
+    visited_urls: list[str] = Field(default_factory=list)
     sources_checked: int = Field(default=0, ge=0)
     relevant_sources: int = Field(default=0, ge=0)
     research_depth: str = "deep"
@@ -97,6 +98,7 @@ class DeepResearchResult(BaseModel):
             "customer_evidence": payload["customer_evidence"],
             "partner_evidence": payload["partner_evidence"],
             "ambiguous_evidence": payload["ambiguous_evidence"],
+            "visited_urls": payload["visited_urls"],
             "sources_checked": int(payload["sources_checked"]),
             "relevant_sources": int(payload["relevant_sources"]),
             "research_depth": payload["research_depth"],

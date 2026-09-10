@@ -3087,6 +3087,36 @@ def _deep_research_evidence_list(items: Any, empty_copy: str) -> str:
     return f'<ul class="deep-source-list">{"".join(cards)}</ul>' if cards else f'<p class="deep-empty">{_escape(empty_copy)}</p>'
 
 
+def _deep_research_visit_logs(value: Any) -> str:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            value = []
+    urls = list(
+        dict.fromkeys(
+            str(item).strip()
+            for item in value
+            if str(item).strip().startswith(("https://", "http://"))
+        )
+    ) if isinstance(value, list) else []
+    entries = "".join(
+        f'<li><a href="{_escape(url)}" target="_blank" rel="noopener noreferrer">{_escape(url)}</a></li>'
+        for url in urls
+    )
+    content = (
+        f'<p>{len(urls)} website{"s" if len(urls) != 1 else ""} visited</p><ol class="deep-log-list">{entries}</ol>'
+        if urls
+        else '<p class="deep-empty">No visited websites were recorded for this run.</p>'
+    )
+    return (
+        '<details class="deep-log-details">'
+        '<summary class="button deep-log-toggle">View logs</summary>'
+        f'<div class="deep-log-content">{content}</div>'
+        '</details>'
+    )
+
+
 def _deep_research_cell(row: dict[str, Any]) -> str:
     person_id = int(row.get("person_id") or 0)
     request_status = str(row.get("dr_request_status") or "idle")
@@ -3143,6 +3173,7 @@ def _deep_research_cell(row: dict[str, Any]) -> str:
     ambiguous_sources = _deep_research_evidence_list(
         row.get("dr_ambiguous_evidence"), "No ambiguous references were retained."
     )
+    visit_logs = _deep_research_visit_logs(row.get("dr_visited_urls"))
     details = f"""
       <details class="row-evidence deep-details">
         <summary class="deep-view">View research</summary>
@@ -3157,6 +3188,7 @@ def _deep_research_cell(row: dict[str, Any]) -> str:
             <div><dt>Official domain</dt><dd>{_escape(row.get('company_domain') or 'Not available')}</dd></div>
             <div><dt>ServiceNow customer page</dt><dd>{customer_page_html}</dd></div>
             <div><dt>Last researched</dt><dd>{_escape(researched_at)}</dd></div>
+            <div class="deep-log-field"><dt>Research logs</dt><dd>{visit_logs}</dd></div>
           </dl>
           <section><h4>Customer evidence</h4>{customer_sources}</section>
           <section><h4>Partner evidence</h4>{partner_sources}</section>
@@ -3369,6 +3401,15 @@ _REDESIGN_STYLES = r"""
   .deep-panel-summary { display:flex; align-items:center; gap:10px; margin:8px 0; color:#334155; font-size:.8125rem; }
   .deep-panel section { margin-top:16px; padding-top:14px; border-top:1px solid var(--border); }
   .deep-panel h4 { margin:0 0 8px; color:#334155; font-size:.8125rem; }
+  .evidence-facts .deep-log-field { grid-column:1 / -1; }
+  .deep-log-details { margin-top:6px; }
+  .deep-log-details summary { list-style:none; }
+  .deep-log-details summary::-webkit-details-marker { display:none; }
+  .deep-log-toggle { min-height:34px; padding:0 11px; color:var(--blue); font-size:.75rem; }
+  .deep-log-content { max-height:230px; margin-top:8px; overflow:auto; padding:10px 12px; border:1px solid var(--border); border-radius:8px; background:var(--surface-soft); }
+  .deep-log-content p { margin:0 0 7px; }
+  .deep-log-list { display:grid; gap:6px; margin:0; padding-left:20px; }
+  .deep-log-list a { color:var(--blue-dark); font-size:.75rem; overflow-wrap:anywhere; }
   .deep-source-list { display:grid; gap:8px; margin:0; padding:0; list-style:none; }
   .deep-source { padding:10px; border:1px solid var(--border); border-radius:8px; background:var(--surface-soft); }
   .deep-source > div { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
