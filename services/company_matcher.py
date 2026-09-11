@@ -32,6 +32,29 @@ LEGAL_SUFFIXES = {
 }
 
 
+def customer_search_name(name: str) -> str:
+    """Return a broad customer-directory query without trailing legal suffixes.
+
+    The resolved company name remains unchanged in storage; this value is only
+    intended for search boxes that often index a trading name instead of the
+    registered legal entity name.
+    """
+
+    text = " ".join(str(name or "").strip().split())
+    suffix_pattern = "|".join(sorted((re.escape(item) for item in LEGAL_SUFFIXES), key=len, reverse=True))
+    while text:
+        shortened = re.sub(
+            rf"(?:[\s,]+|^)(?:{suffix_pattern})\.?$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip(" ,.-")
+        if shortened == text:
+            break
+        text = shortened
+    return text or " ".join(str(name or "").strip().split())
+
+
 def normalize_company_name(name: str) -> str:
     text = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
     text = text.replace("&", " and ")

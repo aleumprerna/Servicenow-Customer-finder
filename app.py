@@ -3250,7 +3250,8 @@ def _simplified_results_table(rows: list[dict[str, Any]]) -> str:
         evidence_html = _result_evidence(row, evidence)
         body.append(
             f"""
-            <tr data-search="{person_name} {headline} {company} {location} {customer_label} {partner_label} {opportunity_label}">
+            <tr data-search="{person_name} {headline} {company} {location} {customer_label} {partner_label} {opportunity_label}" data-customer-status="{customer_raw}">
+              <td class="bulk-select-cell">{f'<input type="checkbox" class="bulk-research-checkbox" data-person-id="{int(row.get("person_id") or 0)}" aria-label="Select {company} for Deep Research">' if customer_raw == 'no' else ''}</td>
               <td><div class="contact-cell"><span class="contact-avatar" aria-label="Serial number {serial_number}">{serial_number}</span><span><strong>{_table_person_link(row)}</strong><small>{headline}</small></span></div></td>
               <td><strong>{company}</strong><small>{location}</small></td>
               <td>{_status_pill(customer_label, customer_tone)}{customer_story_link}</td>
@@ -3261,11 +3262,11 @@ def _simplified_results_table(rows: list[dict[str, Any]]) -> str:
             </tr>"""
         )
     if not body:
-        body.append('<tr><td class="table-empty" colspan="7">Results will appear here when verification is complete.</td></tr>')
+        body.append('<tr><td class="table-empty" colspan="8">Results will appear here when verification is complete.</td></tr>')
     return f"""
       <div class="table-wrap">
         <table class="review-table results-table">
-          <thead><tr><th>Contact</th><th>Company</th><th>ServiceNow customer</th><th>Partner</th><th>Opportunity</th><th>Deep Research</th><th><span class="sr-only">Action</span></th></tr></thead>
+          <thead><tr><th><span class="sr-only">Bulk selection</span></th><th>Contact</th><th>Company</th><th>ServiceNow customer</th><th>Partner</th><th>Opportunity</th><th>Deep Research</th><th><span class="sr-only">Action</span></th></tr></thead>
           <tbody>{''.join(body)}</tbody>
         </table>
       </div>"""
@@ -3345,6 +3346,11 @@ _REDESIGN_STYLES = r"""
   .search-wrap svg { position:absolute; left:13px; top:50%; width:18px; height:18px; color:var(--subtle); transform:translateY(-50%); pointer-events:none; }
   .search-input { width:100%; min-height:44px; padding:0 14px 0 42px; border:1px solid var(--border-strong); border-radius:8px; background:#fff; color:var(--ink); }
   .filter-button.active { border-color:#fed7aa; background:var(--amber-soft); color:var(--amber); }
+  .result-filter-actions,.bulk-research-controls { display:flex; align-items:center; gap:8px; }
+  .bulk-research-controls[hidden] { display:none; }
+  .bulk-select-label { display:flex; align-items:center; gap:7px; color:var(--muted); font-size:.875rem; font-weight:600; white-space:nowrap; }
+  .bulk-research-checkbox,[data-bulk-select-all] { width:18px; height:18px; accent-color:var(--blue); cursor:pointer; }
+  .bulk-select-cell { min-width:48px !important; width:48px; padding-right:0 !important; }
   .workflow-notice { margin:16px 26px 0; padding:11px 13px; border:1px solid #fed7aa; border-radius:8px; background:var(--amber-soft); color:#92400e; font-size:.875rem; }
   .workflow-notice.error { border-color:#fecaca; background:#fef2f2; color:var(--red); }
   .table-wrap { overflow:auto; }
@@ -3355,10 +3361,10 @@ _REDESIGN_STYLES = r"""
   .review-table tbody tr:hover { background:#fbfdff; }
   .contact-cell { min-width:230px; display:flex; align-items:center; gap:12px; }
   .contact-avatar { width:34px; height:34px; display:grid; place-items:center; border-radius:9px; background:var(--blue-soft); color:var(--blue); font-size:.75rem; font-weight:750; flex:0 0 auto; }
-  .contact-cell strong,.contact-cell small,.results-table td:nth-child(2) strong,.results-table td:nth-child(2) small { display:block; }
+  .contact-cell strong,.contact-cell small,.results-table td:nth-child(3) strong,.results-table td:nth-child(3) small { display:block; }
   .contact-cell a { color:var(--ink); text-decoration:none; }
   .contact-cell a:hover { color:var(--blue); text-decoration:underline; }
-  .contact-cell small,.results-table td:nth-child(2) small { max-width:320px; margin-top:3px; color:var(--muted); font-size:.75rem; line-height:1.35; }
+  .contact-cell small,.results-table td:nth-child(3) small { max-width:320px; margin-top:3px; color:var(--muted); font-size:.75rem; line-height:1.35; }
   .status-pill { display:inline-flex; align-items:center; min-height:28px; padding:3px 9px; border-radius:999px; background:#f1f5f9; color:#475569; font-size:.75rem; font-weight:700; white-space:nowrap; }
   .status-pill.success { background:var(--green-soft); color:var(--green); }
   .status-pill.warning { background:var(--amber-soft); color:var(--amber); }
@@ -3558,14 +3564,34 @@ _REDESIGN_SCRIPT = r"""
 
   const searchInput = document.querySelector('[data-table-search]');
   const reviewFilter = document.querySelector('[data-review-filter]');
+  const customerFilters = [...document.querySelectorAll('[data-customer-filter]')];
+  const bulkControls = document.querySelector('[data-bulk-research-controls]');
+  const bulkSelectAll = document.querySelector('[data-bulk-select-all]');
+  const bulkResearchButton = document.querySelector('[data-bulk-deep-research]');
   let needsReviewOnly = false;
+  let customerStatusFilter = '';
+  function updateBulkSelection() {
+    const visibleNoBoxes = [...document.querySelectorAll('tr[data-customer-status="no"]:not([hidden]) .bulk-research-checkbox')];
+    const selected = visibleNoBoxes.filter(box => box.checked).length;
+    if (bulkSelectAll) {
+      bulkSelectAll.checked = visibleNoBoxes.length > 0 && selected === visibleNoBoxes.length;
+      bulkSelectAll.indeterminate = selected > 0 && selected < visibleNoBoxes.length;
+    }
+    if (bulkResearchButton) {
+      bulkResearchButton.disabled = selected === 0;
+      bulkResearchButton.textContent = `Deep Research selected (${selected})`;
+    }
+  }
   function filterRows() {
     const query = (searchInput?.value || '').trim().toLowerCase();
     document.querySelectorAll('tbody tr[data-search]').forEach(row => {
       const matchesQuery = !query || row.dataset.search.toLowerCase().includes(query);
       const matchesReview = !needsReviewOnly || row.dataset.needsReview === 'true';
-      row.hidden = !(matchesQuery && matchesReview);
+      const matchesCustomer = !customerStatusFilter || row.dataset.customerStatus === customerStatusFilter;
+      row.hidden = !(matchesQuery && matchesReview && matchesCustomer);
     });
+    if (bulkControls) bulkControls.hidden = customerStatusFilter !== 'no';
+    updateBulkSelection();
   }
   searchInput?.addEventListener('input', filterRows);
   reviewFilter?.addEventListener('click', () => {
@@ -3573,6 +3599,25 @@ _REDESIGN_SCRIPT = r"""
     reviewFilter.classList.toggle('active', needsReviewOnly);
     reviewFilter.setAttribute('aria-pressed', String(needsReviewOnly));
     filterRows();
+  });
+  customerFilters.forEach(filter => filter.addEventListener('click', () => {
+    const requested = filter.dataset.customerFilter;
+    customerStatusFilter = customerStatusFilter === requested ? '' : requested;
+    customerFilters.forEach(item => {
+      const active = item.dataset.customerFilter === customerStatusFilter;
+      item.classList.toggle('active', active);
+      item.setAttribute('aria-pressed', String(active));
+    });
+    filterRows();
+  }));
+  bulkSelectAll?.addEventListener('change', () => {
+    document.querySelectorAll('tr[data-customer-status="no"]:not([hidden]) .bulk-research-checkbox').forEach(box => {
+      box.checked = bulkSelectAll.checked;
+    });
+    updateBulkSelection();
+  });
+  document.addEventListener('change', event => {
+    if (event.target.matches('.bulk-research-checkbox')) updateBulkSelection();
   });
 
   document.addEventListener('click', async event => {
@@ -3649,7 +3694,12 @@ _REDESIGN_SCRIPT = r"""
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Could not read research progress.');
       const status = data.research?.request_status || 'idle';
-      if (status === 'completed') { window.clearInterval(messageTimer); window.location.reload(); return; }
+      if (status === 'completed') {
+        window.clearInterval(messageTimer);
+        if (data.cell_html) cell.outerHTML = data.cell_html;
+        updateBulkSelection();
+        return;
+      }
       if (status === 'failed') throw new Error(data.research?.last_error || 'Deep Research could not be completed.');
       window.setTimeout(() => pollDeepResearch(personId, cell, button, messageTimer), 1500);
     } catch (error) {
@@ -3662,6 +3712,23 @@ _REDESIGN_SCRIPT = r"""
   }
 
   document.addEventListener('click', async event => {
+    const bulkButton = event.target.closest('[data-bulk-deep-research]');
+    if (bulkButton && !bulkButton.disabled) {
+      const buttons = [...document.querySelectorAll('tr[data-customer-status="no"] .bulk-research-checkbox:checked')]
+        .map(checkbox => checkbox.closest('tr')?.querySelector('.deep-research-btn:not(:disabled)'))
+        .filter(Boolean);
+      if (!buttons.length) return;
+      const noun = buttons.length === 1 ? 'record' : 'records';
+      if (!window.confirm(`Run Deep Research for ${buttons.length} ServiceNow non-customer ${noun}?`)) return;
+      bulkButton.disabled = true;
+      for (let index = 0; index < buttons.length; index += 1) {
+        bulkButton.textContent = `Starting ${index + 1} of ${buttons.length}...`;
+        buttons[index].click();
+        await new Promise(resolve => window.setTimeout(resolve, 120));
+      }
+      bulkButton.textContent = 'Deep Research started';
+      return;
+    }
     const button = event.target.closest('.deep-research-btn');
     if (!button || button.disabled) return;
     const cell = button.closest('.deep-research-cell');
@@ -3683,7 +3750,6 @@ _REDESIGN_SCRIPT = r"""
       });
       const data = await response.json();
       if (!response.ok && response.status !== 409) throw new Error(data.error || 'Deep Research could not start.');
-      if (data.cached) { window.clearInterval(messageTimer); window.location.reload(); return; }
       pollDeepResearch(button.dataset.personId, cell, button, messageTimer);
     } catch (error) {
       window.clearInterval(messageTimer);
@@ -3719,6 +3785,7 @@ def _page(request: Request, selected_run: int | None = None) -> str:
         for row in rows
     ]
     verified_count = sum(str(row.get("servicenow_customer") or "").casefold() == "yes" for row in rows)
+    non_customer_count = sum(str(row.get("servicenow_customer") or "").casefold() == "no" for row in rows)
     partner_count = sum("partner" in relationship.casefold() for relationship in relationships)
     opportunity_count = sum(_relationship_tone(relationship) == "positive" for relationship in relationships)
     enriched_count, automation_count, approved_count = _workflow_counts(rows)
@@ -3838,7 +3905,7 @@ def _page(request: Request, selected_run: int | None = None) -> str:
           <section class="work-surface">
             <div class="result-intro"><span class="complete-icon" aria-hidden="true">✓</span><div><h2>Verification complete</h2><p>Your results are ready to review and share.</p></div></div>
             <header class="surface-header"><div><h2>Results</h2><p>Customer, partner, and opportunity status for every contact.</p></div><div class="surface-actions"><a class="button primary" href="/reports.csv?run_id={selected_run}">Download CSV</a></div></header>
-            <div class="table-tools"><label class="search-wrap"><span class="sr-only">Search results</span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="m16 16 4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><input class="search-input" data-table-search placeholder="Search results…"></label></div>
+            <div class="table-tools"><label class="search-wrap"><span class="sr-only">Search results</span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="m16 16 4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><input class="search-input" data-table-search placeholder="Search results…"></label><div class="result-filter-actions"><button type="button" class="filter-button" data-customer-filter="yes" aria-pressed="false">Customer: Yes ({verified_count})</button><button type="button" class="filter-button" data-customer-filter="no" aria-pressed="false">Customer: No ({non_customer_count})</button><div class="bulk-research-controls" data-bulk-research-controls hidden><label class="bulk-select-label"><input type="checkbox" data-bulk-select-all> Select all</label><button type="button" data-bulk-deep-research disabled>Deep Research selected (0)</button></div></div></div>
             {_simplified_results_table(rows)}
             <footer class="surface-footer"><span>{len(rows)} contacts verified</span><a class="button primary" href="/reports.csv?run_id={selected_run}">Download CSV</a></footer>
           </section>"""
@@ -4291,15 +4358,30 @@ def _run_deep_research_task(database: WorkflowDatabase, person_id: int, settings
 
 @app.get("/api/people/{person_id}/deep-research")
 def get_deep_research(person_id: int) -> JSONResponse:
-    if not DATABASE.person(person_id):
+    person = DATABASE.person(person_id)
+    if not person:
         return JSONResponse(
             status_code=404,
             content={"success": False, "error": "Person record not found."},
         )
+    research = DATABASE.deep_research(person_id) or {"request_status": "idle"}
+    cell_html = ""
+    if research.get("request_status") == "completed":
+        row = next(
+            (
+                item
+                for item in DATABASE.report_rows(int(person["run_id"]))
+                if int(item.get("person_id") or 0) == person_id
+            ),
+            None,
+        )
+        if row:
+            cell_html = _deep_research_cell(row)
     return JSONResponse(
         content={
             "success": True,
-            "research": DATABASE.deep_research(person_id) or {"request_status": "idle"},
+            "research": research,
+            "cell_html": cell_html,
         }
     )
 

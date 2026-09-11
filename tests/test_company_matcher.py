@@ -1,4 +1,11 @@
-from services.company_matcher import company_match_score, normalize_company_name
+from services.company_matcher import customer_search_name, company_match_score, normalize_company_name
+
+
+def test_customer_search_name_removes_legal_suffix_without_changing_core_name() -> None:
+    assert customer_search_name("Harbour Energy plc") == "Harbour Energy"
+    assert customer_search_name("Example Holdings Limited") == "Example Holdings"
+    assert customer_search_name("Acme, Inc.") == "Acme"
+    assert customer_search_name("Harbour Energy") == "Harbour Energy"
 
 
 def test_legal_suffixes_are_removed() -> None:

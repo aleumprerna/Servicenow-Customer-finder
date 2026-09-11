@@ -8,7 +8,7 @@ from pathlib import Path
 from playwright.async_api import Frame, Locator, Page, TimeoutError as PlaywrightTimeoutError, expect
 
 from models.company import CheckStatus, SearchResult
-from services.company_matcher import find_best_match
+from services.company_matcher import customer_search_name, find_best_match
 from services.country_normalizer import country_name, servicenow_country_value
 
 
@@ -130,7 +130,9 @@ class ServiceNowChecker:
         await self._select_country(country_code)
         customer_input = self.frame.locator(SELECTORS["customer_name"]).first
         await expect(customer_input).to_be_enabled(timeout=self.timeout_ms)
-        await customer_input.fill(company_name)
+        search_name = customer_search_name(company_name)
+        LOGGER.info("Searching ServiceNow customer finder for %s", search_name)
+        await customer_input.fill(search_name)
 
         if self.save_screenshots:
             await self._save_screenshot(company_name, "before_search")

@@ -1000,3 +1000,36 @@ def test_zero_confidence_research_popup_still_shows_visit_logs() -> None:
     assert "2 websites visited" in html
     assert 'href="https://example.com/"' in html
     assert 'href="https://www.servicenow.com/customers/example.html"' in html
+
+
+def test_completed_research_endpoint_returns_updated_cell_html(monkeypatch) -> None:
+    row = {
+        "person_id": 10,
+        "run_id": 3,
+        "company_name": "Example Company",
+        "company_domain": "example.com",
+        "dr_request_status": "completed",
+        "dr_classification_status": "CONFIRMED_CUSTOMER",
+        "dr_confidence": 96,
+        "dr_researched_at": "2026-09-11T10:00:00+00:00",
+    }
+
+    class Database:
+        def person(self, person_id):
+            return {"id": person_id, "run_id": 3}
+
+        def deep_research(self, person_id):
+            return {"person_id": person_id, "request_status": "completed"}
+
+        def report_rows(self, run_id):
+            assert run_id == 3
+            return [row]
+
+    monkeypatch.setattr(dashboard, "DATABASE", Database())
+
+    response = dashboard.get_deep_research(10)
+    payload = json.loads(response.body)
+
+    assert payload["research"]["request_status"] == "completed"
+    assert "Confirmed customer" in payload["cell_html"]
+    assert "96% confidence" in payload["cell_html"]
