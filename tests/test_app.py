@@ -117,7 +117,7 @@ def test_people_tables_use_serial_numbers_instead_of_initials() -> None:
         assert 'class="contact-avatar" aria-hidden="true"' not in html
 
 
-def test_results_offer_bulk_research_and_one_no_customer_filter(monkeypatch) -> None:
+def test_results_offer_yes_no_filters_and_selected_bulk_research(monkeypatch) -> None:
     row = _row("apollo_structurally_verified")
     row.update({"check_status": "completed", "servicenow_customer": "No"})
 
@@ -141,11 +141,18 @@ def test_results_offer_bulk_research_and_one_no_customer_filter(monkeypatch) -> 
     html = _page(request, 7)
 
     assert 'data-bulk-deep-research' in html
-    assert "Deep Research all No (1)" in html
-    assert html.count('data-customer-no-filter') == 2  # control plus its script binding
-    assert "ServiceNow customer: No (1)" in html
-    assert 'data-customer-no="true"' in html
+    assert "Deep Research all No" not in html
+    assert 'data-customer-filter="yes"' in html
+    assert 'data-customer-filter="no"' in html
+    assert "Customer: Yes (0)" in html
+    assert "Customer: No (1)" in html
+    assert 'data-bulk-select-all' in html
+    assert "Deep Research selected (0)" in html
+    assert 'data-customer-status="no"' in html
+    assert 'class="bulk-research-checkbox"' in html
     assert "window.confirm" in html
+    assert "if (data.cell_html) cell.outerHTML = data.cell_html" in html
+    assert "if (data.cached) { window.clearInterval(messageTimer); window.location.reload()" not in html
 
 
 def test_final_table_expands_the_whole_record_and_uses_n8n_citations() -> None:
