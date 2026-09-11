@@ -184,6 +184,45 @@ def test_no_evidence_returns_no_official_evidence_without_guessing() -> None:
     assert result.relevant_sources == 0
 
 
+def test_model_cannot_raise_confidence_without_relevant_sources() -> None:
+    result = classify_evidence(
+        company_name="Example Company",
+        official_domain="example.com",
+        findings=[],
+        sources_checked=8,
+        research_depth="deep",
+        model_provider="test",
+        suggestion=ClassificationSuggestion(
+            status="NO_OFFICIAL_EVIDENCE",
+            confidence=54,
+            summary="The model is confident despite retaining no evidence.",
+        ),
+    )
+
+    assert result.status == ResearchClassification.NO_OFFICIAL_EVIDENCE
+    assert result.relevant_sources == 0
+    assert result.confidence == 20
+
+
+def test_no_sources_checked_keeps_zero_confidence_despite_model_suggestion() -> None:
+    result = classify_evidence(
+        company_name="Example Company",
+        official_domain="example.com",
+        findings=[],
+        sources_checked=0,
+        research_depth="deep",
+        model_provider="test",
+        suggestion=ClassificationSuggestion(
+            status="NO_OFFICIAL_EVIDENCE",
+            confidence=54,
+            summary="Unsupported model confidence.",
+        ),
+    )
+
+    assert result.relevant_sources == 0
+    assert result.confidence == 0
+
+
 def test_customer_story_slug_variants_cover_legal_and_brand_names() -> None:
     assert customer_story_slugs("SKF India Ltd.") == ["skf-india-ltd", "skf-india", "skf"]
     assert customer_story_slugs("MOL Group") == ["mol-group", "mol"]

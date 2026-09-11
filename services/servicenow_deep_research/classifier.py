@@ -47,6 +47,7 @@ def classify_evidence(
     authoritative_servicenow_evidence = (
         official_servicenow_stories + official_servicenow_directory_matches
     )
+    relevant_source_count = len({item.url for item in customer + partner + ambiguous})
 
     if official_servicenow_stories:
         status = ResearchClassification.CONFIRMED_CUSTOMER
@@ -101,6 +102,11 @@ def classify_evidence(
         low, high = ranges[status]
         confidence = max(low, min(high, suggestion.confidence))
 
+    # Confidence measures retained evidence, not how many pages were searched.
+    # A model suggestion must not make an unsupported result look well sourced.
+    if relevant_source_count == 0:
+        confidence = min(confidence, 20 if sources_checked else 0)
+
     return DeepResearchResult(
         company_name=company_name,
         official_domain=official_domain,
@@ -111,7 +117,7 @@ def classify_evidence(
         partner_evidence=partner,
         ambiguous_evidence=ambiguous,
         sources_checked=sources_checked,
-        relevant_sources=len({item.url for item in customer + partner + ambiguous}),
+        relevant_sources=relevant_source_count,
         research_depth=research_depth,
         model_provider=model_provider,
     )
