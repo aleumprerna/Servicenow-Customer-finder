@@ -201,7 +201,7 @@ def test_model_cannot_raise_confidence_without_relevant_sources() -> None:
 
     assert result.status == ResearchClassification.NO_OFFICIAL_EVIDENCE
     assert result.relevant_sources == 0
-    assert result.confidence == 20
+    assert result.confidence == 0
 
 
 def test_no_sources_checked_keeps_zero_confidence_despite_model_suggestion() -> None:

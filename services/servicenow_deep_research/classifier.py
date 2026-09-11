@@ -85,7 +85,7 @@ def classify_evidence(
         summary = "ServiceNow references were found, but they do not establish internal use by the company."
     else:
         status = ResearchClassification.NO_OFFICIAL_EVIDENCE
-        confidence = 20 if sources_checked else 0
+        confidence = 0
         summary = "No convincing official evidence of internal ServiceNow use was found."
 
     # A model may improve the wording and fine-tune confidence, but never cross
@@ -105,7 +105,7 @@ def classify_evidence(
     # Confidence measures retained evidence, not how many pages were searched.
     # A model suggestion must not make an unsupported result look well sourced.
     if relevant_source_count == 0:
-        confidence = min(confidence, 20 if sources_checked else 0)
+        confidence = 0
 
     return DeepResearchResult(
         company_name=company_name,
