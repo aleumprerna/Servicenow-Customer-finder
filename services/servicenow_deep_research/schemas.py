@@ -85,6 +85,8 @@ class DeepResearchResult(BaseModel):
     model_provider: str = "llm+rules"
     servicenow_customer_page_found: bool | None = None
     servicenow_customer_page_url: str = ""
+    selected_methods: list[str] = Field(default_factory=list)
+    detection_result: dict[str, Any] = Field(default_factory=dict)
     researched_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
     )
@@ -105,5 +107,7 @@ class DeepResearchResult(BaseModel):
             "model_provider": payload["model_provider"],
             "servicenow_customer_page_found": payload["servicenow_customer_page_found"],
             "servicenow_customer_page_url": payload["servicenow_customer_page_url"],
+            "selected_methods": payload["selected_methods"],
+            "detection_result": payload["detection_result"],
             "researched_at": payload["researched_at"],
         }

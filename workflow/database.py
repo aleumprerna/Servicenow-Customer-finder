@@ -93,6 +93,8 @@ class WorkflowDatabase:
                     model_provider TEXT NOT NULL DEFAULT '',
                     servicenow_customer_page_found INTEGER NOT NULL DEFAULT -1,
                     servicenow_customer_page_url TEXT NOT NULL DEFAULT '',
+                    selected_methods TEXT NOT NULL DEFAULT '[]',
+                    detection_result TEXT NOT NULL DEFAULT '{}',
                     started_at TEXT NOT NULL DEFAULT '',
                     researched_at TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL DEFAULT '',
@@ -118,6 +120,8 @@ class WorkflowDatabase:
                 conn, "deep_research_results", "visited_urls",
                 "TEXT NOT NULL DEFAULT '[]'",
             )
+            self._ensure_column(conn, "deep_research_results", "selected_methods", "TEXT NOT NULL DEFAULT '[]'")
+            self._ensure_column(conn, "deep_research_results", "detection_result", "TEXT NOT NULL DEFAULT '{}'")
             stale_cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
             conn.execute(
                 """UPDATE deep_research_results
@@ -311,6 +315,8 @@ class WorkflowDatabase:
                    d.model_provider AS dr_model_provider,
                    d.servicenow_customer_page_found AS dr_servicenow_customer_page_found,
                    d.servicenow_customer_page_url AS dr_servicenow_customer_page_url,
+                   d.selected_methods AS dr_selected_methods,
+                   d.detection_result AS dr_detection_result,
                    d.started_at AS dr_started_at,
                    d.researched_at AS dr_researched_at,
                    d.last_error AS dr_last_error
@@ -331,12 +337,17 @@ class WorkflowDatabase:
         if row is None:
             return None
         record = dict(row)
-        for key in ("customer_evidence", "partner_evidence", "ambiguous_evidence", "visited_urls"):
+        for key in ("customer_evidence", "partner_evidence", "ambiguous_evidence", "visited_urls", "selected_methods"):
             try:
                 parsed = json.loads(record.get(key) or "[]")
                 record[key] = parsed if isinstance(parsed, list) else []
             except json.JSONDecodeError:
                 record[key] = []
+        try:
+            parsed_result = json.loads(record.get("detection_result") or "{}")
+            record["detection_result"] = parsed_result if isinstance(parsed_result, dict) else {}
+        except json.JSONDecodeError:
+            record["detection_result"] = {}
         return record
 
     def deep_research(self, person_id: int) -> dict[str, Any] | None:
@@ -421,6 +432,7 @@ class WorkflowDatabase:
                     ambiguous_evidence = ?, visited_urls = ?, sources_checked = ?, relevant_sources = ?,
                     research_depth = ?, model_provider = ?,
                     servicenow_customer_page_found = ?, servicenow_customer_page_url = ?,
+                    selected_methods = ?, detection_result = ?,
                     researched_at = ?,
                     updated_at = ?, last_error = ''
                 WHERE person_id = ?""",
@@ -442,6 +454,8 @@ class WorkflowDatabase:
                         else int(bool(values.get("servicenow_customer_page_found")))
                     ),
                     str(values.get("servicenow_customer_page_url") or ""),
+                    json.dumps(values.get("selected_methods") or [], ensure_ascii=False),
+                    json.dumps(values.get("detection_result") or {}, ensure_ascii=False),
                     str(values.get("researched_at") or timestamp),
                     timestamp,
                     person_id,

@@ -17,6 +17,7 @@ from .classifier import classify_evidence
 from .customer_page import ServiceNowCustomerPageVerifier
 from .crawler import BoundedOfficialCrawler, UnsafeResearchTarget, normalize_domain
 from .evidence_extractor import deduplicate_findings, is_official_url, normalize_model_finding
+from .detection_methods import ALL_METHODS, METHOD_LABELS, method_for_finding, normalize_methods, score_findings
 from .schemas import ClassificationSuggestion, DeepResearchResult, EvidenceCategory, EvidenceFinding
 
 
@@ -495,10 +496,14 @@ class DeepResearchService:
         official_domain: str,
         existing_context: dict[str, Any] | None = None,
         research_depth: str = "deep",
+        selected_methods: tuple[str, ...] | list[str] | None = None,
     ) -> DeepResearchResult:
         if research_depth != "deep":
             raise DeepResearchError("Only the deep research mode is currently supported.")
         company = " ".join(str(company_name or "").split())
+        methods = normalize_methods(selected_methods)
+        existing_context = dict(existing_context or {})
+        existing_context["selected_detection_methods"] = [METHOD_LABELS[item] for item in methods]
         if not company:
             raise DeepResearchError("A resolved company name is required for Deep Research.")
         try:
@@ -565,7 +570,7 @@ class DeepResearchService:
 
         findings = deduplicate_findings(findings)
         customer_page_check = None
-        if self.customer_page_verifier is not None:
+        if self.customer_page_verifier is not None and "official" in methods:
             customer_page_check = self.customer_page_verifier.check(company, discovered_source_urls)
             sources_checked += len(customer_page_check.checked_urls)
             visited_urls.extend(customer_page_check.checked_urls)
@@ -591,6 +596,9 @@ class DeepResearchService:
         ):
             raise provider_failed
 
+        if methods != ALL_METHODS:
+            findings = [item for item in findings if method_for_finding(item, methods)]
+
         suggestion = self.provider.suggest_classification(
             company_name=company,
             official_domain=domain,
@@ -608,7 +616,12 @@ class DeepResearchService:
             ),
             suggestion=suggestion,
         )
-        result = result.model_copy(update={"visited_urls": list(dict.fromkeys(visited_urls))})
+        detection_result = score_findings(company, findings, methods)
+        result = result.model_copy(update={
+            "visited_urls": list(dict.fromkeys(visited_urls)),
+            "selected_methods": list(methods),
+            "detection_result": detection_result,
+        })
         if customer_page_check is not None:
             result = result.model_copy(
                 update={

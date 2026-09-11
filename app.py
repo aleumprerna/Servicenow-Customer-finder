@@ -46,6 +46,7 @@ from services.servicenow_deep_research.crawler import (
     normalize_domain,
     validate_public_domain,
 )
+from services.servicenow_deep_research.detection_methods import METHOD_LABELS, normalize_methods
 
 from workflow.database import WorkflowDatabase
 
@@ -3141,6 +3142,16 @@ def _deep_research_cell(row: dict[str, Any]) -> str:
     label, tone = labels.get(classification, ("Not researched", "neutral"))
     is_running = request_status == "running"
     has_result = bool(classification and row.get("dr_researched_at"))
+    detection_result = row.get("dr_detection_result") or {}
+    if isinstance(detection_result, str):
+        try:
+            detection_result = json.loads(detection_result)
+        except json.JSONDecodeError:
+            detection_result = {}
+    detection_status = str(detection_result.get("servicenow_status") or "") if isinstance(detection_result, dict) else ""
+    detection_score = int(detection_result.get("confidence_score") or 0) if isinstance(detection_result, dict) else 0
+    detected_modules = detection_result.get("detected_modules") or [] if isinstance(detection_result, dict) else []
+    modules_text = ", ".join(str(item) for item in detected_modules) or "None detected"
     button_label = "Researching..." if is_running else "Run again" if has_result else "Deep Research"
     disabled = " disabled" if is_running or not company_name else ""
     title = "" if domain else ' title="Official domain will be found with AI before research"'
@@ -3194,6 +3205,8 @@ def _deep_research_cell(row: dict[str, Any]) -> str:
             <div><dt>Relevant sources</dt><dd>{int(row.get('dr_relevant_sources') or 0)}</dd></div>
             <div><dt>Official domain</dt><dd>{_escape(row.get('company_domain') or 'Not available')}</dd></div>
             <div><dt>ServiceNow customer page</dt><dd>{customer_page_html}</dd></div>
+            <div><dt>Evidence score</dt><dd>{_escape(detection_status or label)} · {detection_score}/100</dd></div>
+            <div><dt>Detected modules</dt><dd>{_escape(modules_text)}</dd></div>
             <div><dt>Last researched</dt><dd>{_escape(researched_at)}</dd></div>
             <div class="deep-log-field"><dt>Research logs</dt><dd>{visit_logs}</dd></div>
           </dl>
@@ -3206,6 +3219,7 @@ def _deep_research_cell(row: dict[str, Any]) -> str:
         '<div class="deep-research-cell">'
         f'{_status_pill(label, tone)}'
         f'<small>{confidence}% confidence · {int(row.get("dr_relevant_sources") or 0)} sources</small>'
+        f'{f"<small>{_escape(detection_status)} · evidence score {detection_score}/100</small>" if detection_status else ""}'
         f'<small>Last researched: {_escape(researched_at.split(" ", 1)[0])}</small>'
         f'{details}{button}{progress}{error_html}'
         '</div>'
@@ -3270,6 +3284,19 @@ def _simplified_results_table(rows: list[dict[str, Any]]) -> str:
           <tbody>{''.join(body)}</tbody>
         </table>
       </div>"""
+
+
+def _detection_method_selector() -> str:
+    options = "".join(
+        f'<label><input type="checkbox" value="{_escape(key)}" data-detection-method> {_escape(label)}</label>'
+        for key, label in METHOD_LABELS.items()
+    )
+    return f"""
+      <details class="detection-methods">
+        <summary>ServiceNow Detection Methods</summary>
+        <div class="detection-method-grid">{options}</div>
+        <label class="run-all-methods"><input type="checkbox" value="all" data-detection-all checked> Run All Methods</label>
+      </details>"""
 
 
 _REDESIGN_STYLES = r"""
@@ -3351,6 +3378,12 @@ _REDESIGN_STYLES = r"""
   .bulk-select-label { display:flex; align-items:center; gap:7px; color:var(--muted); font-size:.875rem; font-weight:600; white-space:nowrap; }
   .bulk-research-checkbox,[data-bulk-select-all] { width:18px; height:18px; accent-color:var(--blue); cursor:pointer; }
   .bulk-select-cell { min-width:48px !important; width:48px; padding-right:0 !important; }
+  .detection-methods { margin:16px 26px 0; padding:12px 14px; border:1px solid var(--border); border-radius:10px; background:var(--surface-soft); }
+  .detection-methods summary { min-height:auto; padding:0; border:0; background:transparent; color:var(--ink); font-weight:700; cursor:pointer; }
+  .detection-method-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 18px; margin-top:14px; }
+  .detection-method-grid label,.run-all-methods { display:flex; align-items:center; gap:8px; color:#475569; font-size:.875rem; }
+  .detection-methods input { width:17px; height:17px; accent-color:var(--blue); }
+  .run-all-methods { margin-top:12px; padding-top:12px; border-top:1px solid var(--border); color:var(--blue-dark); font-weight:700; }
   .workflow-notice { margin:16px 26px 0; padding:11px 13px; border:1px solid #fed7aa; border-radius:8px; background:var(--amber-soft); color:#92400e; font-size:.875rem; }
   .workflow-notice.error { border-color:#fecaca; background:#fef2f2; color:var(--red); }
   .table-wrap { overflow:auto; }
@@ -3619,6 +3652,20 @@ _REDESIGN_SCRIPT = r"""
   document.addEventListener('change', event => {
     if (event.target.matches('.bulk-research-checkbox')) updateBulkSelection();
   });
+  const allMethods = document.querySelector('[data-detection-all]');
+  const methodOptions = [...document.querySelectorAll('[data-detection-method]')];
+  allMethods?.addEventListener('change', () => {
+    if (allMethods.checked) methodOptions.forEach(option => { option.checked = false; });
+  });
+  methodOptions.forEach(option => option.addEventListener('change', () => {
+    if (option.checked && allMethods) allMethods.checked = false;
+    if (!methodOptions.some(item => item.checked) && allMethods) allMethods.checked = true;
+  }));
+  function selectedDetectionMethods() {
+    if (allMethods?.checked) return 'all';
+    const selected = methodOptions.filter(option => option.checked).map(option => option.value);
+    return selected.length ? selected.join(',') : 'all';
+  }
 
   document.addEventListener('click', async event => {
     const button = event.target.closest('.ai-resolve-btn');
@@ -3744,7 +3791,11 @@ _REDESIGN_SCRIPT = r"""
       if (message) message.textContent = researchMessages[messageIndex];
     }, 2600);
     try {
-      const body = new URLSearchParams({force:button.dataset.force || 'false', research_depth:'deep'});
+      const body = new URLSearchParams({
+        force:button.dataset.force || 'false',
+        research_depth:'deep',
+        detection_methods:selectedDetectionMethods()
+      });
       const response = await fetch(`/api/people/${button.dataset.personId}/deep-research`, {
         method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body
       });
@@ -3905,6 +3956,7 @@ def _page(request: Request, selected_run: int | None = None) -> str:
           <section class="work-surface">
             <div class="result-intro"><span class="complete-icon" aria-hidden="true">✓</span><div><h2>Verification complete</h2><p>Your results are ready to review and share.</p></div></div>
             <header class="surface-header"><div><h2>Results</h2><p>Customer, partner, and opportunity status for every contact.</p></div><div class="surface-actions"><a class="button primary" href="/reports.csv?run_id={selected_run}">Download CSV</a></div></header>
+            {_detection_method_selector()}
             <div class="table-tools"><label class="search-wrap"><span class="sr-only">Search results</span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="m16 16 4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><input class="search-input" data-table-search placeholder="Search results…"></label><div class="result-filter-actions"><button type="button" class="filter-button" data-customer-filter="yes" aria-pressed="false">Customer: Yes ({verified_count})</button><button type="button" class="filter-button" data-customer-filter="no" aria-pressed="false">Customer: No ({non_customer_count})</button><div class="bulk-research-controls" data-bulk-research-controls hidden><label class="bulk-select-label"><input type="checkbox" data-bulk-select-all> Select all</label><button type="button" data-bulk-deep-research disabled>Deep Research selected (0)</button></div></div></div>
             {_simplified_results_table(rows)}
             <footer class="surface-footer"><span>{len(rows)} contacts verified</span><a class="button primary" href="/reports.csv?run_id={selected_run}">Download CSV</a></footer>
@@ -4302,7 +4354,12 @@ def ai_resolve_company(
 
 
 
-def _run_deep_research_task(database: WorkflowDatabase, person_id: int, settings: Any) -> None:
+def _run_deep_research_task(
+    database: WorkflowDatabase,
+    person_id: int,
+    settings: Any,
+    selected_methods: tuple[str, ...] | None = None,
+) -> None:
     person = database.person(person_id)
     if not person:
         return
@@ -4349,6 +4406,7 @@ def _run_deep_research_task(database: WorkflowDatabase, person_id: int, settings
             official_domain=str(person.get("company_domain") or ""),
             existing_context=context,
             research_depth="deep",
+            selected_methods=selected_methods,
         )
         database.complete_deep_research(person_id, result.as_storage_values())
     except Exception as exc:
@@ -4392,6 +4450,7 @@ def start_deep_research(
     background_tasks: BackgroundTasks,
     force: bool = Form(False),
     research_depth: str = Form("deep"),
+    detection_methods: str = Form("all"),
 ) -> JSONResponse:
     person = DATABASE.person(person_id)
     if not person:
@@ -4421,6 +4480,8 @@ def start_deep_research(
             content={"success": False, "error": "Deep Research is already running.", "research": existing},
         )
 
+    raw_methods = detection_methods if isinstance(detection_methods, str) else "all"
+    methods = normalize_methods(raw_methods.split(","))
     settings = load_settings()
     if not settings.llm_api_key:
         return JSONResponse(
@@ -4486,7 +4547,8 @@ def start_deep_research(
             DATABASE.upsert_check(
                 person_id, int(person["run_id"]), location_values
             )
-    if not force and DATABASE.deep_research_is_fresh(person_id, settings.deep_research_cache_days):
+    cached_methods = normalize_methods(existing.get("selected_methods") if existing else None)
+    if not force and cached_methods == methods and DATABASE.deep_research_is_fresh(person_id, settings.deep_research_cache_days):
         return JSONResponse(
             content={"success": True, "cached": True, "research": DATABASE.deep_research(person_id)},
         )
@@ -4508,7 +4570,7 @@ def start_deep_research(
                 "research": DATABASE.deep_research(person_id),
             },
         )
-    background_tasks.add_task(_run_deep_research_task, DATABASE, person_id, settings)
+    background_tasks.add_task(_run_deep_research_task, DATABASE, person_id, settings, methods)
     return JSONResponse(
         status_code=202,
         content={"success": True, "cached": False, "research": DATABASE.deep_research(person_id)},
