@@ -232,6 +232,10 @@ def test_page_renders_progress_steps_and_three_record_tabs(monkeypatch) -> None:
 
     html = _page(request, 7)
 
+    assert "Advanced options and logs" in html
+    assert 'class="usage-info-btn"' in html
+    assert "AI usage for this dataset" in html
+
     assert html.count('class="workflow-step ') == 3
     assert 'id="tab-enriched"' in html
     assert 'id="tab-automation"' in html

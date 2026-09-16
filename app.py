@@ -117,6 +117,21 @@ def _format_action_usage(summary: dict[str, Any]) -> str:
     )
 
 
+def _format_call_cost(metric: dict[str, Any]) -> str:
+    value = metric.get("estimated_cost_usd")
+    return "Not configured" if value is None else f"${float(value):.6f}"
+
+
+def _person_ai_summary(database: Any, person_id: int, **filters: Any) -> dict[str, Any]:
+    loader = getattr(database, "ai_metrics_summary_for_person", None)
+    return loader(person_id, **filters) if callable(loader) else {}
+
+
+def _run_ai_summary(database: Any, run_id: int) -> dict[str, Any]:
+    loader = getattr(database, "ai_metrics_summary", None)
+    return loader(run_id) if callable(loader) else {}
+
+
 
 ENRICHED_CHECK_STATUSES = {"apollo_success", "ai_success", "searching", "completed", "manual_review", "error"}
 
@@ -3312,7 +3327,7 @@ def _simplified_results_table(rows: list[dict[str, Any]]) -> str:
               <td>{_status_pill(customer_label, customer_tone)}{customer_story_link}</td>
               <td>{_status_pill(partner_label, 'info') if partner_label != '—' else '<span class="no-action">—</span>'}</td>
               <td>{_status_pill(opportunity_label, 'success') if opportunity_label != '—' else '<span class="no-action">—</span>'}</td>
-              <td>{_deep_research_cell(row)}</td>
+              <td>{_deep_research_cell(row, row.get('_deep_research_usage'))}</td>
               <td><div class="row-action-group"><details class="row-evidence"><summary class="button row-action">View evidence</summary><div class="evidence-panel"><h3>{company}</h3>{evidence_html}</div></details>{_usage_info_button(row)}</div></td>
             </tr>"""
         )
@@ -3429,6 +3444,9 @@ _REDESIGN_STYLES = r"""
   .row-review summary,.row-evidence summary { list-style:none; }
   .row-review summary::-webkit-details-marker,.row-evidence summary::-webkit-details-marker { display:none; }
   .row-action { min-height:36px; padding:0 12px; color:var(--blue); font-size:.8125rem; }
+  .row-action-group { display:flex; align-items:center; gap:8px; }
+  .usage-info-btn { width:32px; height:32px; min-height:32px; padding:0; border:1px solid #bfdbfe; border-radius:50%; background:var(--blue-soft); color:var(--blue-dark); font-family:Georgia,serif; font-size:.9rem; font-weight:700; }
+  .usage-info-btn:hover { border-color:#60a5fa; background:#dbeafe; }
   .review-panel,.evidence-panel { position:absolute; z-index:20; top:43px; right:0; width:min(390px,calc(100vw - 48px)); padding:18px; border:1px solid var(--border-strong); border-radius:12px; background:#fff; box-shadow:0 18px 45px rgba(15,23,42,.18); }
   .row-review .review-panel { position:fixed; z-index:100; top:50%; left:50%; right:auto; width:min(460px,calc(100vw - 48px)); max-height:80vh; overflow:auto; transform:translate(-50%,-50%); }
   .review-close { position:absolute; top:10px; right:10px; min-width:34px; min-height:34px; padding:0; border-color:transparent; background:transparent; color:var(--muted); font-size:1.35rem; }
@@ -3505,6 +3523,30 @@ _REDESIGN_STYLES = r"""
   .run-log { grid-column:1 / -1; }
   .run-log summary { cursor:pointer; }
   .run-log pre { max-height:220px; overflow:auto; padding:12px; border-radius:8px; background:#0f172a; color:#e2e8f0; font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; white-space:pre-wrap; }
+  .ai-run-monitor { grid-column:1 / -1; padding-top:14px; border-top:1px solid var(--border); }
+  .ai-run-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:12px; }
+  .ai-run-heading h3 { margin-bottom:2px; color:var(--ink); }
+  .ai-run-heading p { color:var(--muted); }
+  .ai-run-heading .button { min-height:34px; padding:0 10px; font-size:.75rem; }
+  .ai-metric-grid { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:8px; margin-bottom:14px; }
+  .ai-metric-grid > div { min-width:0; padding:11px; border:1px solid var(--border); border-radius:8px; background:var(--surface-soft); }
+  .ai-metric-grid span,.ai-metric-grid strong { display:block; }
+  .ai-metric-grid span { margin-bottom:4px; color:var(--muted); font-size:.68rem; font-weight:700; text-transform:uppercase; }
+  .ai-metric-grid strong { overflow:hidden; color:var(--ink); font-size:.95rem; text-overflow:ellipsis; }
+  .ai-log-table { width:100%; border-collapse:collapse; margin-top:10px; }
+  .ai-log-table th,.ai-log-table td { padding:8px 10px; border-bottom:1px solid var(--border); text-align:left; white-space:nowrap; }
+  .usage-dialog { width:min(720px,calc(100vw - 32px)); max-height:80vh; padding:0; border:1px solid var(--border-strong); border-radius:14px; background:#fff; color:var(--ink); box-shadow:0 24px 70px rgba(15,23,42,.25); }
+  .usage-dialog::backdrop { background:rgba(15,23,42,.45); }
+  .usage-dialog-header { display:flex; justify-content:space-between; gap:18px; padding:18px 20px 14px; border-bottom:1px solid var(--border); }
+  .usage-dialog-header h3 { margin-bottom:2px; }
+  .usage-dialog-header p { margin:0; color:var(--muted); font-size:.8125rem; }
+  .usage-dialog-close { width:34px; height:34px; min-height:34px; padding:0; border:0; background:transparent; color:var(--muted); font-size:1.35rem; }
+  [data-usage-content] { padding:18px 20px 22px; overflow:auto; }
+  .record-usage-summary { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin-bottom:16px; }
+  .record-usage-summary > div { padding:10px; border:1px solid var(--border); border-radius:8px; background:var(--surface-soft); }
+  .record-usage-summary span,.record-usage-summary strong { display:block; }
+  .record-usage-summary span { color:var(--muted); font-size:.68rem; font-weight:700; text-transform:uppercase; }
+  .record-usage-summary strong { margin-top:3px; }
   .danger { border-color:#fecaca; color:var(--red); }
   .sr-only { position:absolute!important; width:1px!important; height:1px!important; padding:0!important; margin:-1px!important; overflow:hidden!important; clip:rect(0,0,0,0)!important; white-space:nowrap!important; border:0!important; }
   [hidden] { display:none!important; }
@@ -3533,6 +3575,7 @@ _REDESIGN_STYLES = r"""
     .surface-header,.table-tools,.surface-footer { padding-left:18px; padding-right:18px; }
     .surface-actions,.surface-actions form,.surface-actions .button { width:100%; }
     .advanced-grid { grid-template-columns:1fr; }
+    .ai-metric-grid,.record-usage-summary { grid-template-columns:repeat(2,1fr); }
     .review-panel,.evidence-panel { position:fixed; top:50%; left:50%; right:auto; transform:translate(-50%,-50%); max-height:80vh; overflow:auto; }
   }
   @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none!important; transition:none!important; scroll-behavior:auto!important; } }
@@ -3549,6 +3592,82 @@ _REDESIGN_SCRIPT = r"""
     const element = document.querySelector(selector);
     if (element) element.textContent = value;
   }
+
+  const numberFormat = new Intl.NumberFormat();
+  function formatDuration(milliseconds) {
+    const seconds = Number(milliseconds || 0) / 1000;
+    if (seconds < 60) return `${seconds.toFixed(1)}s`;
+    const rounded = Math.round(seconds);
+    return `${Math.floor(rounded / 60)}m ${String(rounded % 60).padStart(2, '0')}s`;
+  }
+  function formatCost(summary) {
+    const calls = Number(summary?.call_count || 0);
+    const priced = Number(summary?.priced_calls || 0);
+    if (!calls || !priced || summary?.estimated_cost_usd == null) return 'Not configured';
+    return `$${Number(summary.estimated_cost_usd).toFixed(6)}${priced < calls ? '*' : ''}`;
+  }
+  function formatActionUsage(summary) {
+    if (!Number(summary?.call_count || 0)) return '';
+    return `${numberFormat.format(Number(summary.total_tokens || 0))} tokens · ${formatDuration(summary.model_latency_ms)} · ${formatCost(summary)}`;
+  }
+  function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, character => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[character]));
+  }
+  function applyRunUsage(summary, calls) {
+    if (!summary) return;
+    const values = {
+      calls:numberFormat.format(Number(summary.call_count || 0)),
+      input:numberFormat.format(Number(summary.input_tokens || 0)),
+      output:numberFormat.format(Number(summary.output_tokens || 0)),
+      tokens:numberFormat.format(Number(summary.total_tokens || 0)),
+      latency:formatDuration(summary.model_latency_ms),
+      cost:formatCost(summary),
+    };
+    Object.entries(values).forEach(([key, value]) => {
+      document.querySelectorAll(`[data-ai-total="${key}"], [data-ai-top="${key}"]`).forEach(element => { element.textContent = value; });
+    });
+    if (Array.isArray(calls)) {
+      const body = document.querySelector('[data-ai-call-log]');
+      if (body) body.innerHTML = calls.map(call => `<tr><td>${escapeHtml(call.person_name || call.company_name || 'Run-level')}</td><td>${escapeHtml(call.operation || 'AI call')}</td><td>${escapeHtml(`${call.provider || ''}:${call.model || ''}`)}</td><td>${numberFormat.format(Number(call.total_tokens || 0))}</td><td>${formatDuration(call.latency_ms)}</td><td>${call.estimated_cost_usd == null ? 'Not configured' : `$${Number(call.estimated_cost_usd).toFixed(6)}`}</td><td>${escapeHtml(call.status || '')}</td></tr>`).join('');
+    }
+  }
+  async function refreshRunUsage(runId) {
+    if (!runId) return;
+    try {
+      const response = await fetch(`/api/runs/${runId}/ai-metrics`, {cache:'no-store'});
+      if (!response.ok) return;
+      const data = await response.json();
+      applyRunUsage(data.summary, data.calls);
+    } catch (_error) {}
+  }
+
+  document.querySelector('[data-refresh-ai-usage]')?.addEventListener('click', event => {
+    refreshRunUsage(event.currentTarget.closest('[data-ai-run-monitor]')?.dataset.runId);
+  });
+
+  const usageDialog = document.querySelector('[data-usage-dialog]');
+  document.querySelector('[data-usage-close]')?.addEventListener('click', () => usageDialog?.close());
+  usageDialog?.addEventListener('click', event => { if (event.target === usageDialog) usageDialog.close(); });
+  document.addEventListener('click', async event => {
+    const button = event.target.closest('.usage-info-btn');
+    if (!button || !usageDialog) return;
+    const content = usageDialog.querySelector('[data-usage-content]');
+    const title = usageDialog.querySelector('[data-usage-title]');
+    if (content) content.innerHTML = '<p class="muted">Loading usage…</p>';
+    usageDialog.showModal();
+    try {
+      const response = await fetch(`/api/people/${button.dataset.personId}/ai-metrics`, {cache:'no-store'});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Could not load usage.');
+      if (title) title.textContent = `${data.person.person_name || data.person.company_name || 'Record'} · AI usage`;
+      const summary = data.summary || {};
+      const rows = (data.calls || []).map(call => `<tr><td>${escapeHtml(call.operation)}</td><td>${escapeHtml(`${call.provider}:${call.model}`)}</td><td>${numberFormat.format(Number(call.input_tokens || 0))}</td><td>${numberFormat.format(Number(call.output_tokens || 0))}</td><td>${numberFormat.format(Number(call.total_tokens || 0))}</td><td>${formatDuration(call.latency_ms)}</td><td>${call.estimated_cost_usd == null ? 'Not configured' : `$${Number(call.estimated_cost_usd).toFixed(6)}`}</td></tr>`).join('');
+      if (content) content.innerHTML = `<div class="record-usage-summary"><div><span>Calls</span><strong>${numberFormat.format(Number(summary.call_count || 0))}</strong></div><div><span>Total tokens</span><strong>${numberFormat.format(Number(summary.total_tokens || 0))}</strong></div><div><span>Model latency</span><strong>${formatDuration(summary.model_latency_ms)}</strong></div><div><span>Estimated cost</span><strong>${formatCost(summary)}</strong></div></div>${rows ? `<div class="table-scroll"><table class="ai-log-table"><thead><tr><th>Operation</th><th>Model</th><th>Input</th><th>Output</th><th>Total</th><th>Latency</th><th>Cost</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="muted">No AI usage has been recorded for this record yet.</p>'}`;
+      applyRunUsage(data.run_summary);
+    } catch (error) {
+      if (content) content.innerHTML = `<p class="deep-error">${escapeHtml(error.message)}</p>`;
+    }
+  });
 
   function applyProgress(data) {
     const value = data.run_status === 'enriching' ? data.processed : data.automated;
@@ -3688,7 +3807,11 @@ _REDESIGN_SCRIPT = r"""
       const params = new URLSearchParams({run_id:button.dataset.runId,auto_approve:'false'});
       const response = await fetch(`/api/people/${button.dataset.personId}/ai-resolve-company`, {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:params});
       const data = await response.json();
-      if (!response.ok || !data.success) throw new Error(data.error || 'Could not suggest a company.');
+      if (!response.ok || !data.success) {
+        const usageText = formatActionUsage(data.usage);
+        await refreshRunUsage(button.dataset.runId);
+        throw new Error(`${data.error || 'Could not suggest a company.'}${usageText ? ` AI usage: ${usageText}.` : ''}`);
+      }
       if (input) {
         input.value = data.company_name;
         input.dataset.suggestedCompany = data.company_name;
@@ -3710,9 +3833,12 @@ _REDESIGN_SCRIPT = r"""
       if (submitButton) submitButton.textContent = 'Confirm AI company';
       if (statusEl) {
         const locationText = data.location ? ` · Headquarters: ${data.location}` : '';
-        statusEl.textContent = `Suggested: ${data.company_name}${locationText}. Press Confirm AI company to submit.`;
+        const usageText = formatActionUsage(data.usage);
+        statusEl.textContent = `Suggested: ${data.company_name}${locationText}. ${usageText ? `AI usage: ${usageText}. ` : ''}Press Confirm AI company to submit.`;
         statusEl.className = 'ai-status-msg success';
       }
+      applyRunUsage(data.run_usage);
+      await refreshRunUsage(button.dataset.runId);
       button.disabled = false;
       button.textContent = 'Suggest again';
     } catch (error) {
@@ -3749,13 +3875,21 @@ _REDESIGN_SCRIPT = r"""
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Could not read research progress.');
       const status = data.research?.request_status || 'idle';
+      applyRunUsage(data.run_usage);
       if (status === 'completed') {
         window.clearInterval(messageTimer);
         if (data.cell_html) cell.outerHTML = data.cell_html;
+        applyRunUsage(data.run_usage);
+        await refreshRunUsage(data.run_usage?.run_id);
         updateBulkSelection();
         return;
       }
-      if (status === 'failed') throw new Error(data.research?.last_error || 'Deep Research could not be completed.');
+      if (status === 'failed') {
+        applyRunUsage(data.run_usage);
+        await refreshRunUsage(data.run_usage?.run_id);
+        const usageText = formatActionUsage(data.usage);
+        throw new Error(`${data.research?.last_error || 'Deep Research could not be completed.'}${usageText ? ` AI usage: ${usageText}.` : ''}`);
+      }
       window.setTimeout(() => pollDeepResearch(personId, cell, button, messageTimer), 1500);
     } catch (error) {
       window.clearInterval(messageTimer);
@@ -3836,6 +3970,17 @@ def _page(request: Request, selected_run: int | None = None) -> str:
     run = DATABASE.run(selected_run) if selected_run else None
     metrics_loader = getattr(DATABASE, "ai_metrics_summary", None)
     ai_summary = metrics_loader(selected_run) if selected_run and callable(metrics_loader) else {}
+    calls_loader = getattr(DATABASE, "ai_metrics", None)
+    ai_calls = calls_loader(selected_run) if selected_run and callable(calls_loader) else []
+    person_metrics_loader = getattr(DATABASE, "ai_metrics_summary_for_person", None)
+    if callable(person_metrics_loader):
+        for row in rows:
+            if row.get("dr_started_at"):
+                row["_deep_research_usage"] = person_metrics_loader(
+                    int(row.get("person_id") or 0),
+                    operation_prefix="deep_research.",
+                    since=str(row.get("dr_started_at") or ""),
+                )
 
     relationships = [
         _relationship(row, parse_n8n_evidence(str(row.get("n8n_status") or ""), str(row.get("n8n_response") or "")))
@@ -3879,10 +4024,10 @@ def _page(request: Request, selected_run: int | None = None) -> str:
             <div class="metric-card verified"><strong class="metric-value">{verified_count}</strong><span class="metric-label">Verified Customers</span></div>
             <div class="metric-card"><strong class="metric-value">{partner_count}</strong><span class="metric-label">Partner Accounts</span></div>
             <div class="metric-card"><strong class="metric-value">{opportunity_count}</strong><span class="metric-label">Opportunities</span></div>
-            <div class="metric-card"><strong class="metric-value">{int(ai_summary.get('call_count') or 0):,}</strong><span class="metric-label">AI Calls</span></div>
-            <div class="metric-card"><strong class="metric-value">{int(ai_summary.get('total_tokens') or 0):,}</strong><span class="metric-label">AI Tokens</span></div>
-            <div class="metric-card"><strong class="metric-value">{_format_metric_duration(ai_summary.get('model_latency_ms'))}</strong><span class="metric-label">Total Model Latency</span></div>
-            <div class="metric-card"><strong class="metric-value">{_format_metric_cost(ai_summary)}</strong><span class="metric-label">Estimated AI Cost</span></div>
+            <div class="metric-card"><strong class="metric-value" data-ai-top="calls">{int(ai_summary.get('call_count') or 0):,}</strong><span class="metric-label">AI Calls</span></div>
+            <div class="metric-card"><strong class="metric-value" data-ai-top="tokens">{int(ai_summary.get('total_tokens') or 0):,}</strong><span class="metric-label">AI Tokens</span></div>
+            <div class="metric-card"><strong class="metric-value" data-ai-top="latency">{_format_metric_duration(ai_summary.get('model_latency_ms'))}</strong><span class="metric-label">Total Model Latency</span></div>
+            <div class="metric-card"><strong class="metric-value" data-ai-top="cost">{_format_metric_cost(ai_summary)}</strong><span class="metric-label">Estimated AI Cost</span></div>
           </section>"""
         options = "".join(
             f'<option value="{item["id"]}" {"selected" if int(item["id"]) == selected_run else ""}>'
@@ -3972,28 +4117,37 @@ def _page(request: Request, selected_run: int | None = None) -> str:
           </section>"""
 
     run_log = _escape(run.get("collection_log")) if run and run.get("collection_log") else ""
-    ai_record_rows = "".join(
+    ai_call_rows = "".join(
         "<tr>"
         f"<td>{_escape(item.get('person_name') or item.get('company_name') or 'Run-level')}</td>"
-        f"<td>{int(item.get('call_count') or 0)}</td>"
+        f"<td>{_escape(item.get('operation') or 'AI call')}</td>"
+        f"<td>{_escape(item.get('provider'))}:{_escape(item.get('model'))}</td>"
         f"<td>{int(item.get('total_tokens') or 0):,}</td>"
-        f"<td>{_format_metric_duration(item.get('model_latency_ms'))}</td>"
-        f"<td>{_format_metric_cost(item)}</td>"
+        f"<td>{_format_metric_duration(item.get('latency_ms'))}</td>"
+        f"<td>{_format_call_cost(item)}</td>"
+        f"<td>{_escape(item.get('status') or '')}</td>"
         "</tr>"
-        for item in ai_summary.get("records", [])
+        for item in ai_calls
     )
-    ai_details = (
-        f'<details class="run-log"><summary>AI usage by record</summary>'
-        f'<div class="table-scroll"><table><thead><tr><th>Record</th><th>Calls</th>'
-        f'<th>Tokens</th><th>Model latency</th><th>Estimated cost</th></tr></thead>'
-        f'<tbody>{ai_record_rows}</tbody></table></div>'
-        f'<p class="muted">Cost is based on the configured per-token and web-search rates. '
-        f'An asterisk means one or more calls were unpriced.</p></details>'
-        if ai_record_rows else ""
-    )
+    ai_details = f"""
+      <section class="ai-run-monitor" data-ai-run-monitor data-run-id="{selected_run or ''}">
+        <div class="ai-run-heading"><div><h3>AI usage for this dataset</h3><p>Totals include company suggestions, headquarters lookup, and Deep Research.</p></div><button type="button" class="button" data-refresh-ai-usage>Refresh</button></div>
+        <div class="ai-metric-grid">
+          <div><span>Calls</span><strong data-ai-total="calls">{int(ai_summary.get('call_count') or 0):,}</strong></div>
+          <div><span>Input tokens</span><strong data-ai-total="input">{int(ai_summary.get('input_tokens') or 0):,}</strong></div>
+          <div><span>Output tokens</span><strong data-ai-total="output">{int(ai_summary.get('output_tokens') or 0):,}</strong></div>
+          <div><span>Total tokens</span><strong data-ai-total="tokens">{int(ai_summary.get('total_tokens') or 0):,}</strong></div>
+          <div><span>Model latency</span><strong data-ai-total="latency">{_format_metric_duration(ai_summary.get('model_latency_ms'))}</strong></div>
+          <div><span>Estimated cost</span><strong data-ai-total="cost">{_format_metric_cost(ai_summary)}</strong></div>
+        </div>
+        <details class="run-log"><summary>View AI call logs</summary>
+          <div class="table-scroll"><table class="ai-log-table"><thead><tr><th>Record</th><th>Operation</th><th>Model</th><th>Tokens</th><th>Latency</th><th>Cost</th><th>Status</th></tr></thead><tbody data-ai-call-log>{ai_call_rows}</tbody></table></div>
+          <p class="muted">Cost uses the configured token and web-search rates. “Not configured” means pricing rates are missing.</p>
+        </details>
+      </section>"""
     advanced = f"""
       <details class="advanced">
-        <summary>Advanced options</summary>
+        <summary>Advanced options and logs</summary>
         <div class="advanced-grid">
           <p><strong>Verification service</strong><br><span id="advanced-login-copy">{_escape(login_snapshot.detail or login_snapshot.status)}</span></p>
           <div class="advanced-actions">
@@ -4022,6 +4176,10 @@ def _page(request: Request, selected_run: int | None = None) -> str:
       {main_surface}
       {advanced}
       <div class="sr-only legacy-contract" aria-hidden="true"><button class="tab-button active" id="tab-enriched">Enriched records</button><button id="tab-automation">Web automation</button><button id="tab-final">Final table</button><form class="async-stage-form"><div class="stage-progress"></div></form><span>Companies approved</span></div>
+      <dialog class="usage-dialog" data-usage-dialog>
+        <div class="usage-dialog-header"><div><h3 data-usage-title>Record AI usage</h3><p>Token, latency, and cost details for this record.</p></div><button type="button" class="usage-dialog-close" data-usage-close aria-label="Close">×</button></div>
+        <div data-usage-content><p class="muted">Loading usage…</p></div>
+      </dialog>
     </main><script>{_REDESIGN_SCRIPT}</script></body></html>"""
 
 
@@ -4253,10 +4411,11 @@ def ai_resolve_company(
         metrics_callback=_metric_recorder(DATABASE, actual_run_id, person_id),
 
     )
-    action_usage = DATABASE.ai_metrics_summary_for_person(
+    action_usage = _person_ai_summary(
+        DATABASE,
         person_id, operation_prefix="company_resolution", latest_only=True
     )
-    run_usage = DATABASE.ai_metrics_summary(actual_run_id)
+    run_usage = _run_ai_summary(DATABASE, actual_run_id)
 
 
 
@@ -4461,13 +4620,14 @@ def get_deep_research(person_id: int) -> JSONResponse:
             content={"success": False, "error": "Person record not found."},
         )
     research = DATABASE.deep_research(person_id) or {"request_status": "idle"}
-    action_usage = DATABASE.ai_metrics_summary_for_person(
+    action_usage = _person_ai_summary(
+        DATABASE,
         person_id,
         operation_prefix="deep_research.",
         since=str(research.get("started_at") or ""),
     )
-    record_usage = DATABASE.ai_metrics_summary_for_person(person_id)
-    run_usage = DATABASE.ai_metrics_summary(int(person["run_id"]))
+    record_usage = _person_ai_summary(DATABASE, person_id)
+    run_usage = _run_ai_summary(DATABASE, int(person["run_id"]))
     cell_html = ""
     if research.get("request_status") == "completed":
         row = next(

@@ -103,6 +103,12 @@ def test_database_aggregates_ai_metrics_by_run_and_record(tmp_path) -> None:
     assert summary["estimated_cost_usd"] == 0.003
     assert summary["records"][0]["person_name"] == "Ada"
     assert len(database.ai_metrics(run_id)) == 2
+    latest = database.ai_metrics_summary_for_person(
+        person_id, operation_prefix="deep_research.", latest_only=True
+    )
+    assert latest["call_count"] == 1
+    assert latest["total_tokens"] == 60
+    assert len(database.ai_metrics_for_person(person_id)) == 2
 
 
 def test_telemetry_failure_does_not_fail_model_call() -> None:
