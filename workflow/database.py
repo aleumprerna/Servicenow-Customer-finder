@@ -98,9 +98,30 @@ class WorkflowDatabase:
                     updated_at TEXT NOT NULL DEFAULT '',
                     last_error TEXT NOT NULL DEFAULT ''
                 );
+                CREATE TABLE IF NOT EXISTS ai_call_metrics (
+                    id INTEGER PRIMARY KEY,
+                    run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                    person_id INTEGER REFERENCES people(id) ON DELETE CASCADE,
+                    operation TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    latency_ms REAL NOT NULL DEFAULT 0,
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
+                    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_tokens INTEGER NOT NULL DEFAULT 0,
+                    web_search_calls INTEGER NOT NULL DEFAULT 0,
+                    estimated_cost_usd REAL,
+                    status TEXT NOT NULL DEFAULT 'completed',
+                    error TEXT NOT NULL DEFAULT ''
+                );
                 CREATE INDEX IF NOT EXISTS idx_people_run ON people(run_id);
                 CREATE INDEX IF NOT EXISTS idx_checks_run ON company_checks(run_id);
                 CREATE INDEX IF NOT EXISTS idx_deep_research_run ON deep_research_results(run_id);
+                CREATE INDEX IF NOT EXISTS idx_ai_metrics_run ON ai_call_metrics(run_id);
+                CREATE INDEX IF NOT EXISTS idx_ai_metrics_person ON ai_call_metrics(person_id);
                 """
             )
             self._ensure_column(conn, "people", "company_domain", "TEXT NOT NULL DEFAULT ''")
@@ -170,6 +191,142 @@ class WorkflowDatabase:
         assignments = ", ".join(f"{key} = ?" for key in values)
         with self.connect() as conn:
             conn.execute(f"UPDATE runs SET {assignments} WHERE id = ?", (*values.values(), run_id))
+
+    def record_ai_metric(
+        self, *, run_id: int, person_id: int | None = None, **metric: Any
+    ) -> int:
+        """Persist one model request without storing prompts, responses, or credentials."""
+
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """INSERT INTO ai_call_metrics (
+                    run_id, person_id, operation, provider, model, started_at, latency_ms,
+                    input_tokens, cached_input_tokens, output_tokens, reasoning_tokens,
+                    total_tokens, web_search_calls, estimated_cost_usd, status, error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    run_id,
+                    person_id,
+                    str(metric.get("operation") or "unknown"),
+                    str(metric.get("provider") or "unknown"),
+                    str(metric.get("model") or "unknown"),
+                    str(metric.get("started_at") or now()),
+                    float(metric.get("latency_ms") or 0),
+                    int(metric.get("input_tokens") or 0),
+                    int(metric.get("cached_input_tokens") or 0),
+                    int(metric.get("output_tokens") or 0),
+                    int(metric.get("reasoning_tokens") or 0),
+                    int(metric.get("total_tokens") or 0),
+                    int(metric.get("web_search_calls") or 0),
+                    (
+                        None
+                        if metric.get("estimated_cost_usd") is None
+                        else float(metric["estimated_cost_usd"])
+                    ),
+                    str(metric.get("status") or "completed"),
+                    str(metric.get("error") or "")[:1000],
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def ai_metrics(self, run_id: int) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT m.*, p.person_name, p.company_name
+                FROM ai_call_metrics m
+                LEFT JOIN people p ON p.id = m.person_id
+                WHERE m.run_id = ? ORDER BY m.id""",
+                (run_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def ai_metrics_for_person(self, person_id: int) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM ai_call_metrics
+                WHERE person_id = ? ORDER BY id""",
+                (person_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def ai_metrics_summary_for_person(
+        self,
+        person_id: int,
+        *,
+        operation_prefix: str = "",
+        since: str = "",
+        latest_only: bool = False,
+    ) -> dict[str, Any]:
+        conditions = ["person_id = ?"]
+        parameters: list[Any] = [person_id]
+        if operation_prefix:
+            conditions.append("operation LIKE ?")
+            parameters.append(f"{operation_prefix}%")
+        if since:
+            conditions.append("started_at >= ?")
+            parameters.append(since)
+        where = " AND ".join(conditions)
+        if latest_only:
+            where += f" AND id = (SELECT MAX(id) FROM ai_call_metrics WHERE {' AND '.join(conditions)})"
+            parameters.extend(parameters.copy())
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""SELECT COUNT(*) AS call_count,
+                    COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                    COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens,
+                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                    COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+                    COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                    COALESCE(SUM(web_search_calls), 0) AS web_search_calls,
+                    COALESCE(SUM(latency_ms), 0) AS model_latency_ms,
+                    SUM(estimated_cost_usd) AS estimated_cost_usd,
+                    SUM(CASE WHEN estimated_cost_usd IS NOT NULL THEN 1 ELSE 0 END) AS priced_calls,
+                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_calls
+                FROM ai_call_metrics WHERE {where}""",
+                tuple(parameters),
+            ).fetchone()
+        result = dict(row) if row else {}
+        result["person_id"] = person_id
+        return result
+
+    def ai_metrics_summary(self, run_id: int) -> dict[str, Any]:
+        with self.connect() as conn:
+            total = conn.execute(
+                """SELECT COUNT(*) AS call_count,
+                    COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                    COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens,
+                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                    COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+                    COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                    COALESCE(SUM(web_search_calls), 0) AS web_search_calls,
+                    COALESCE(SUM(latency_ms), 0) AS model_latency_ms,
+                    SUM(estimated_cost_usd) AS estimated_cost_usd,
+                    SUM(CASE WHEN estimated_cost_usd IS NOT NULL THEN 1 ELSE 0 END) AS priced_calls,
+                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_calls,
+                    MIN(started_at) AS first_call_at,
+                    MAX(started_at) AS last_call_at
+                FROM ai_call_metrics WHERE run_id = ?""",
+                (run_id,),
+            ).fetchone()
+            people = conn.execute(
+                """SELECT m.person_id, p.person_name, p.company_name,
+                    COUNT(*) AS call_count,
+                    COALESCE(SUM(m.total_tokens), 0) AS total_tokens,
+                    COALESCE(SUM(m.latency_ms), 0) AS model_latency_ms,
+                    SUM(m.estimated_cost_usd) AS estimated_cost_usd,
+                    SUM(CASE WHEN m.estimated_cost_usd IS NOT NULL THEN 1 ELSE 0 END) AS priced_calls,
+                    SUM(CASE WHEN m.status = 'failed' THEN 1 ELSE 0 END) AS failed_calls
+                FROM ai_call_metrics m
+                LEFT JOIN people p ON p.id = m.person_id
+                WHERE m.run_id = ?
+                GROUP BY m.person_id, p.person_name, p.company_name
+                ORDER BY MIN(m.id)""",
+                (run_id,),
+            ).fetchall()
+        result = dict(total) if total else {}
+        result["run_id"] = run_id
+        result["records"] = [dict(row) for row in people]
+        return result
 
     def person(self, person_id: int) -> dict[str, Any] | None:
         with self.connect() as conn:

@@ -21,6 +21,7 @@ class GeminiRateLimitError(GeminiAPIError):
 class GeminiResult:
     text: str
     source_urls: set[str]
+    usage_metadata: dict[str, Any] | None = None
 
 
 class GeminiClient:
@@ -111,7 +112,12 @@ class GeminiClient:
                 raise GeminiAPIError("Gemini API returned invalid JSON.") from exc
             text = self._response_text(data)
             if text:
-                return GeminiResult(text=text, source_urls=self._source_urls(data))
+                usage = data.get("usageMetadata")
+                return GeminiResult(
+                    text=text,
+                    source_urls=self._source_urls(data),
+                    usage_metadata=usage if isinstance(usage, dict) else None,
+                )
             detail = self._empty_response_detail(data)
             if (
                 empty_retries < 1

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -19,6 +20,7 @@ from services.country_normalizer import CountryNormalizationError, country_name,
 from services.ai_company_resolver import resolve_company_headquarters
 from services.csv_service import CSVService
 from utils.logger import configure_logging
+from workflow.database import WorkflowDatabase
 
 
 LOGGER = logging.getLogger(__name__)
@@ -106,6 +108,15 @@ async def enrich_indices(
     """Checkpoint Apollo organization data without touching the browser."""
 
     apollo = build_apollo_client(settings)
+    metrics_database: WorkflowDatabase | None = None
+    metrics_run_id = 0
+    metrics_path = os.getenv("AI_METRICS_DATABASE", "").strip()
+    try:
+        metrics_run_id = int(os.getenv("AI_METRICS_RUN_ID", "0"))
+    except ValueError:
+        metrics_run_id = 0
+    if metrics_path and metrics_run_id:
+        metrics_database = WorkflowDatabase(Path(metrics_path))
     for position, index in enumerate(indices, start=1):
         try:
             record = csv_service.record(index)
@@ -133,6 +144,19 @@ async def enrich_indices(
                     record.company_name,
                     clean_error(apollo_exc),
                 )
+                metrics_callback = None
+                if metrics_database is not None and "source_person_id" in csv_service.frame.columns:
+                    try:
+                        metric_person_id = int(
+                            str(csv_service.frame.at[index, "source_person_id"] or "0")
+                        )
+                    except ValueError:
+                        metric_person_id = 0
+                    metrics_callback = (
+                        lambda metric, person_id=metric_person_id: metrics_database.record_ai_metric(
+                            run_id=metrics_run_id, person_id=person_id or None, **metric
+                        )
+                    )
                 ai_result = await asyncio.to_thread(
                     resolve_company_headquarters,
                     record.company_name,
@@ -141,6 +165,7 @@ async def enrich_indices(
                     base_url=settings.llm_base_url,
                     model=settings.llm_model,
                     provider=settings.llm_provider,
+                    metrics_callback=metrics_callback,
                 )
                 if not ai_result.get("success"):
                     raise apollo_exc

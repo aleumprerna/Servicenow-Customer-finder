@@ -59,6 +59,10 @@ class Settings(BaseModel):
     deep_research_request_timeout_seconds: float = Field(default=180.0, gt=0, le=600)
     deep_research_max_content_chars: int = Field(default=250_000, ge=10_000, le=2_000_000)
     deep_research_cache_days: int = Field(default=30, ge=1, le=365)
+    llm_input_cost_per_million: float | None = Field(default=None, ge=0)
+    llm_cached_input_cost_per_million: float | None = Field(default=None, ge=0)
+    llm_output_cost_per_million: float | None = Field(default=None, ge=0)
+    llm_web_search_cost_per_call: float | None = Field(default=None, ge=0)
 
     @field_validator("input_csv", "output_csv", "debug_dir", mode="before")
     @classmethod
@@ -206,5 +210,11 @@ def load_settings(env_file: Path | None = None) -> Settings:
             "DEEP_RESEARCH_MAX_CONTENT_CHARS", "250000"
         ),
         "deep_research_cache_days": dynamic_value("DEEP_RESEARCH_CACHE_DAYS", "30"),
+        "llm_input_cost_per_million": dynamic_value("LLM_INPUT_COST_PER_MILLION") or None,
+        "llm_cached_input_cost_per_million": (
+            dynamic_value("LLM_CACHED_INPUT_COST_PER_MILLION") or None
+        ),
+        "llm_output_cost_per_million": dynamic_value("LLM_OUTPUT_COST_PER_MILLION") or None,
+        "llm_web_search_cost_per_call": dynamic_value("LLM_WEB_SEARCH_COST_PER_CALL") or None,
     }
     return Settings.model_validate(data)

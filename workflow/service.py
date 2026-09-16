@@ -340,12 +340,17 @@ def send_negatives_to_n8n(database: WorkflowDatabase, run_id: int, settings: Set
 def _pipeline_process(
     *, input_path: Path, output_path: Path, stage: str, force: bool,
     progress_callback: Any | None = None,
+    metrics_database_path: Path | None = None,
+    metrics_run_id: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment["INPUT_CSV"] = str(input_path)
     environment["OUTPUT_CSV"] = str(output_path)
     environment["DEBUG_DIR"] = str(input_path.parent / "debug")
     environment["SAVE_SCREENSHOTS"] = "true"
+    if metrics_database_path is not None and metrics_run_id is not None:
+        environment["AI_METRICS_DATABASE"] = str(metrics_database_path)
+        environment["AI_METRICS_RUN_ID"] = str(metrics_run_id)
     venv_python = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
     python_executable = str(venv_python) if venv_python.is_file() else sys.executable
     command = [python_executable, "main.py"]
@@ -408,6 +413,8 @@ def run_enrichment(database: WorkflowDatabase, run_id: int) -> None:
             stage="--enrich-only",
             force=True,
             progress_callback=lambda: sync_pipeline_results(database, run_id, output_path),
+            metrics_database_path=database.path,
+            metrics_run_id=run_id,
         )
         synced_count = sync_pipeline_results(database, run_id, output_path)
         report_rows = database.report_rows(run_id)

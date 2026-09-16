@@ -12,6 +12,7 @@ import requests
 
 from services.gemini_client import GeminiClient
 from services.kie_client import KieClient
+from services.ai_metrics import AIPricing, MetricCallback, monitored_ai_call
 
 from .classifier import classify_evidence
 from .customer_page import ServiceNowCustomerPageVerifier
@@ -259,6 +260,8 @@ class LLMResearchProvider:
         timeout_seconds: float = 180.0,
         max_retries: int = 4,
         retry_base_seconds: float = 2.0,
+        metrics_callback: MetricCallback | None = None,
+        pricing: AIPricing | None = None,
     ) -> None:
         if not str(api_key or "").strip():
             raise ResearchConfigurationError(
@@ -268,6 +271,8 @@ class LLMResearchProvider:
         self.provider_name = provider_name.casefold()
         self.supports_hosted_web_search = supports_hosted_web_search
         self.reasoning_effort = reasoning_effort
+        self.metrics_callback = metrics_callback
+        self.pricing = pricing or AIPricing()
         if self.provider_name == "gemini":
             self.client = GeminiClient(
                 api_key,
@@ -294,6 +299,19 @@ class LLMResearchProvider:
     @property
     def provider_label(self) -> str:
         return f"{self.provider_name}:{self.model}"
+
+    def _model_call(
+        self, call: Any, *, operation: str, web_search: bool = False
+    ) -> Any:
+        return monitored_ai_call(
+            call,
+            operation=operation,
+            provider=getattr(self, "provider_name", "openai"),
+            model=self.model,
+            callback=getattr(self, "metrics_callback", None),
+            pricing=getattr(self, "pricing", AIPricing()),
+            web_search_calls=1 if web_search else 0,
+        )
 
     @staticmethod
     def _findings(
@@ -385,7 +403,14 @@ result's URL. Do not invent URLs or evidence. Return an empty findings list when
             search_tool["filters"] = {"allowed_domains": [official_domain]}
         try:
             if getattr(self, "provider_name", "openai") == "gemini":
-                response = self.client.generate(prompt, use_google_search=True)
+                response = self._model_call(
+                    lambda: self.client.generate(prompt, use_google_search=True),
+                    operation=(
+                        "deep_research.official_discovery"
+                        if official_only else "deep_research.external_discovery"
+                    ),
+                    web_search=True,
+                )
                 payload = _json_object(response.text)
                 source_urls = _expand_grounding_source_urls(response.source_urls)
             elif getattr(self, "provider_name", "openai") == "kie":
@@ -397,7 +422,14 @@ result's URL. Do not invent URLs or evidence. Return an empty findings list when
                 reasoning_effort = getattr(self, "reasoning_effort", None)
                 if reasoning_effort:
                     request["reasoning"] = {"effort": reasoning_effort}
-                response = self.client.responses.create(**request)
+                response = self._model_call(
+                    lambda: self.client.responses.create(**request),
+                    operation=(
+                        "deep_research.official_discovery"
+                        if official_only else "deep_research.external_discovery"
+                    ),
+                    web_search=True,
+                )
                 payload = _json_object(response.output_text)
                 source_urls = _response_source_urls(response)
             else:
@@ -411,7 +443,14 @@ result's URL. Do not invent URLs or evidence. Return an empty findings list when
                 reasoning_effort = getattr(self, "reasoning_effort", None)
                 if reasoning_effort:
                     request["reasoning"] = {"effort": reasoning_effort}
-                response = self.client.responses.create(**request)
+                response = self._model_call(
+                    lambda: self.client.responses.create(**request),
+                    operation=(
+                        "deep_research.official_discovery"
+                        if official_only else "deep_research.external_discovery"
+                    ),
+                    web_search=True,
+                )
                 payload = _json_object(response.output_text)
                 source_urls = _response_source_urls(response)
         except ResearchProviderError:
@@ -441,7 +480,10 @@ Evidence: {json.dumps(evidence, ensure_ascii=False)[:28000]}
 """.strip()
         try:
             if self.provider_name == "gemini":
-                output_text = self.client.generate(prompt).text
+                output_text = self._model_call(
+                    lambda: self.client.generate(prompt),
+                    operation="deep_research.classification",
+                ).text
             elif self.provider_name == "kie":
                 request: dict[str, Any] = {
                     "model": self.model,
@@ -450,7 +492,10 @@ Evidence: {json.dumps(evidence, ensure_ascii=False)[:28000]}
                 reasoning_effort = getattr(self, "reasoning_effort", None)
                 if reasoning_effort:
                     request["reasoning"] = {"effort": reasoning_effort}
-                response = self.client.responses.create(**request)
+                response = self._model_call(
+                    lambda: self.client.responses.create(**request),
+                    operation="deep_research.classification",
+                )
                 output_text = response.output_text
             elif self.supports_hosted_web_search:
                 request: dict[str, Any] = {
@@ -461,13 +506,19 @@ Evidence: {json.dumps(evidence, ensure_ascii=False)[:28000]}
                 reasoning_effort = getattr(self, "reasoning_effort", None)
                 if reasoning_effort:
                     request["reasoning"] = {"effort": reasoning_effort}
-                response = self.client.responses.create(**request)
+                response = self._model_call(
+                    lambda: self.client.responses.create(**request),
+                    operation="deep_research.classification",
+                )
                 output_text = response.output_text
             else:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0,
+                response = self._model_call(
+                    lambda: self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0,
+                    ),
+                    operation="deep_research.classification",
                 )
                 output_text = response.choices[0].message.content or ""
             return ClassificationSuggestion.model_validate(_json_object(output_text))

@@ -11,6 +11,7 @@ from services.country_normalizer import CountryNormalizationError, normalize_cou
 from services.gemini_client import GeminiClient
 from services.kie_client import KieClient
 from services.company_matcher import company_match_score
+from services.ai_metrics import MetricCallback, monitored_ai_call, pricing_from_settings
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,7 @@ def resolve_company_headquarters(
     base_url: str | None = None,
     model: str | None = None,
     provider: str | None = None,
+    metrics_callback: MetricCallback | None = None,
 ) -> dict[str, Any]:
     """Resolve headquarters for an already-confirmed company without changing its identity."""
 
@@ -89,6 +91,7 @@ def resolve_company_headquarters(
     key = api_key or settings.llm_api_key
     selected_model = model or settings.llm_model
     selected_base_url = base_url or settings.llm_base_url
+    pricing = pricing_from_settings(settings)
     company = " ".join(str(company_name or "").split())
     if not company:
         return {"success": False, "error": "A company name is required."}
@@ -118,34 +121,55 @@ Return JSON only:
 """.strip()
     try:
         if provider_name == "gemini":
-            response = GeminiClient(
-                key,
-                model=selected_model,
-                base_url=selected_base_url,
+            client = GeminiClient(
+                key, model=selected_model, base_url=selected_base_url,
                 max_retries=settings.gemini_max_retries,
                 retry_base_seconds=settings.gemini_retry_base_seconds,
-            ).generate(prompt, use_google_search=True, use_url_context=True)
+            )
+            response = monitored_ai_call(
+                lambda: client.generate(prompt, use_google_search=True, use_url_context=True),
+                operation="company_headquarters",
+                provider=provider_name,
+                model=selected_model,
+                callback=metrics_callback,
+                pricing=pricing,
+                web_search_calls=1,
+            )
             raw_text = response.text
             source_urls = sorted(response.source_urls)
         elif provider_name == "kie":
-            response = KieClient(key, base_url=selected_base_url).responses.create(
+            client = KieClient(key, base_url=selected_base_url)
+            response = monitored_ai_call(
+                lambda: client.responses.create(
+                    model=selected_model, tools=[{"type": "web_search"}], input=prompt,
+                    reasoning={"effort": settings.kie_reasoning_effort},
+                ),
+                operation="company_headquarters",
+                provider=provider_name,
                 model=selected_model,
-                tools=[{"type": "web_search"}],
-                input=prompt,
-                reasoning={"effort": settings.kie_reasoning_effort},
+                callback=metrics_callback,
+                pricing=pricing,
+                web_search_calls=1,
             )
             raw_text = response.output_text
             source_urls = _valid_source_urls_from_payload(response.model_dump())
         else:
             import openai
 
-            response = openai.OpenAI(
-                api_key=key, base_url=selected_base_url
-            ).responses.create(
+            client = openai.OpenAI(api_key=key, base_url=selected_base_url)
+            response = monitored_ai_call(
+                lambda: client.responses.create(
+                    model=selected_model,
+                    tools=[{"type": "web_search"}],
+                    include=["web_search_call.action.sources"],
+                    input=prompt,
+                ),
+                operation="company_headquarters",
+                provider=provider_name,
                 model=selected_model,
-                tools=[{"type": "web_search"}],
-                include=["web_search_call.action.sources"],
-                input=prompt,
+                callback=metrics_callback,
+                pricing=pricing,
+                web_search_calls=1,
             )
             raw_text = getattr(response, "output_text", str(response)).strip()
             source_urls = _valid_source_urls_from_payload(response.model_dump())
@@ -195,6 +219,7 @@ def resolve_company_from_web(
     provider: str | None = None,
     require_headquarters: bool = False,
     require_grounding: bool = False,
+    metrics_callback: MetricCallback | None = None,
 ) -> dict[str, Any]:
     """Search the web to resolve a person's current company from their LinkedIn profile.
 
@@ -206,6 +231,7 @@ def resolve_company_from_web(
     key = api_key or settings.llm_api_key
     selected_model = model or settings.llm_model
     selected_base_url = base_url or settings.llm_base_url
+    pricing = pricing_from_settings(settings)
     failure_reason = ""
 
     # 1. Attempt resolution with the configured model if its API key is present.
@@ -242,21 +268,35 @@ def resolve_company_from_web(
             )
 
             if provider_name == "gemini":
-                result = GeminiClient(
-                    key,
-                    model=selected_model,
-                    base_url=selected_base_url,
+                client = GeminiClient(
+                    key, model=selected_model, base_url=selected_base_url,
                     max_retries=settings.gemini_max_retries,
                     retry_base_seconds=settings.gemini_retry_base_seconds,
-                ).generate(prompt, use_google_search=True, use_url_context=True)
+                )
+                result = monitored_ai_call(
+                    lambda: client.generate(prompt, use_google_search=True, use_url_context=True),
+                    operation="company_resolution",
+                    provider=provider_name,
+                    model=selected_model,
+                    callback=metrics_callback,
+                    pricing=pricing,
+                    web_search_calls=1,
+                )
                 raw_text = result.text
                 source_urls = sorted(result.source_urls)
             elif provider_name == "kie":
-                response = KieClient(key, base_url=selected_base_url).responses.create(
+                client = KieClient(key, base_url=selected_base_url)
+                response = monitored_ai_call(
+                    lambda: client.responses.create(
+                        model=selected_model, tools=[{"type": "web_search"}], input=prompt,
+                        reasoning={"effort": settings.kie_reasoning_effort},
+                    ),
+                    operation="company_resolution",
+                    provider=provider_name,
                     model=selected_model,
-                    tools=[{"type": "web_search"}],
-                    input=prompt,
-                    reasoning={"effort": settings.kie_reasoning_effort},
+                    callback=metrics_callback,
+                    pricing=pricing,
+                    web_search_calls=1,
                 )
                 raw_text = response.output_text
                 source_urls = _valid_source_urls_from_payload(response.model_dump())
@@ -264,11 +304,19 @@ def resolve_company_from_web(
                 import openai
 
                 client = openai.OpenAI(api_key=key, base_url=selected_base_url)
-                response = client.responses.create(
+                response = monitored_ai_call(
+                    lambda: client.responses.create(
+                        model=selected_model,
+                        tools=[{"type": "web_search"}],
+                        include=["web_search_call.action.sources"],
+                        input=prompt,
+                    ),
+                    operation="company_resolution",
+                    provider=provider_name,
                     model=selected_model,
-                    tools=[{"type": "web_search"}],
-                    include=["web_search_call.action.sources"],
-                    input=prompt,
+                    callback=metrics_callback,
+                    pricing=pricing,
+                    web_search_calls=1,
                 )
                 raw_text = getattr(response, "output_text", str(response)).strip()
                 source_urls = _valid_source_urls_from_payload(response.model_dump())
@@ -276,10 +324,17 @@ def resolve_company_from_web(
                 import openai
 
                 client = openai.OpenAI(api_key=key, base_url=selected_base_url)
-                response = client.chat.completions.create(
+                response = monitored_ai_call(
+                    lambda: client.chat.completions.create(
+                        model=selected_model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0,
+                    ),
+                    operation="company_resolution",
+                    provider=provider_name,
                     model=selected_model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0,
+                    callback=metrics_callback,
+                    pricing=pricing,
                 )
                 raw_text = str(response.choices[0].message.content or "").strip()
                 source_urls = []

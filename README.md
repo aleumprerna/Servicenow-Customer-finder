@@ -160,6 +160,26 @@ OUTPUT_CSV=companies_checked.csv
 
 `LLM_PROVIDER=openai` sends all active model calls to OpenAI's Responses API with `gpt-5.6-luna` and hosted web search. KIE, Gemini, and GLM remain configured alternatives and can be restored by changing `LLM_PROVIDER` and supplying that provider's API key.
 
+### AI usage monitoring
+
+Every model request is recorded in the local SQLite workflow database. The dashboard shows total
+AI calls, input/output token totals, summed model latency, and estimated cost for the selected CSV
+run. Open **Advanced options → AI usage by record** for the per-contact breakdown, or request
+`GET /api/runs/{run_id}/ai-metrics` for the complete call ledger and aggregates.
+
+Token and latency monitoring works without additional configuration. Cost calculation is opt-in
+because prices differ by provider and model; set the current USD rates in `.env`:
+
+```dotenv
+LLM_INPUT_COST_PER_MILLION=
+LLM_CACHED_INPUT_COST_PER_MILLION=
+LLM_OUTPUT_COST_PER_MILLION=
+LLM_WEB_SEARCH_COST_PER_CALL=
+```
+
+Update these values when changing models or when provider pricing changes. The telemetry ledger
+stores metadata and usage totals only; it does not store prompts, model responses, or API keys.
+
 Do not commit `.env`. The optional `SERVICENOW_USERNAME` and `SERVICENOW_PASSWORD` values are reserved for a possible future login flow and are not read or logged by the current workflow. `HEADLESS` is also informational because an attached browser keeps its existing mode.
 
 Matching thresholds default to:

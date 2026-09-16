@@ -33,6 +33,7 @@ from browser.session_monitor import LoginSessionMonitor
 from config import PROJECT_ROOT, load_settings
 
 from services.ai_company_resolver import resolve_company_from_web, resolve_company_headquarters
+from services.ai_metrics import pricing_from_settings
 
 from services.servicenow_deep_research import (
     DeepResearchService,
@@ -78,6 +79,42 @@ LOGGER = logging.getLogger(__name__)
 LOGIN_MONITOR = LoginSessionMonitor()
 
 app = FastAPI(title="ServiceNow Partner Workflow", docs_url=None, redoc_url=None)
+
+
+def _metric_recorder(
+    database: WorkflowDatabase, run_id: int, person_id: int | None
+) -> Any:
+    return lambda metric: database.record_ai_metric(
+        run_id=run_id, person_id=person_id, **metric
+    )
+
+
+def _format_metric_duration(milliseconds: Any) -> str:
+    seconds = float(milliseconds or 0) / 1000
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, remainder = divmod(round(seconds), 60)
+    return f"{minutes}m {remainder:02d}s"
+
+
+def _format_metric_cost(summary: dict[str, Any]) -> str:
+    calls = int(summary.get("call_count") or 0)
+    priced = int(summary.get("priced_calls") or 0)
+    cost = summary.get("estimated_cost_usd")
+    if not calls or not priced or cost is None:
+        return "Not configured"
+    suffix = "*" if priced < calls else ""
+    return f"${float(cost):.6f}{suffix}"
+
+
+def _format_action_usage(summary: dict[str, Any]) -> str:
+    if not int(summary.get("call_count") or 0):
+        return ""
+    return (
+        f'{int(summary.get("total_tokens") or 0):,} tokens · '
+        f'{_format_metric_duration(summary.get("model_latency_ms"))} · '
+        f'{_format_metric_cost(summary)}'
+    )
 
 
 
@@ -728,6 +765,15 @@ def _status_pill(label: str, tone: str = "neutral") -> str:
     return f'<span class="status-pill {tone}">{_escape(label)}</span>'
 
 
+def _usage_info_button(row: dict[str, Any]) -> str:
+    person_id = int(row.get("person_id") or 0)
+    label = _escape(row.get("person_name") or row.get("company_name") or "record")
+    return (
+        f'<button type="button" class="usage-info-btn" data-person-id="{person_id}" '
+        f'aria-label="View AI usage for {label}" title="View AI usage">i</button>'
+    )
+
+
 def _enrichment_table(rows: list[dict[str, Any]]) -> str:
     body: list[str] = []
     for serial_number, row in enumerate(rows, start=1):
@@ -1089,6 +1135,8 @@ def _legacy_page(request: Request, selected_run: int | None = None) -> str:
         selected_run = int(summaries[0]["id"])
     rows = DATABASE.report_rows(selected_run) if selected_run else []
     run = DATABASE.run(selected_run) if selected_run else None
+    metrics_loader = getattr(DATABASE, "ai_metrics_summary", None)
+    ai_summary = metrics_loader(selected_run) if selected_run and callable(metrics_loader) else {}
     options = "".join(
         f'<option value="{item["id"]}" {"selected" if item["id"] == selected_run else ""}>'
         f'Batch #{item["id"]} — {_escape(item["status"])} ({item["people_count"]} prospects)</option>'
@@ -3010,7 +3058,7 @@ def _review_companies_table(rows: list[dict[str, Any]]) -> str:
               <td><strong>{company}</strong></td>
               <td>{location}</td>
               <td>{status}</td>
-              <td>{review}</td>
+              <td><div class="row-action-group">{review}{_usage_info_button(row)}</div></td>
             </tr>"""
         )
     if not body:
@@ -3124,7 +3172,9 @@ def _deep_research_visit_logs(value: Any) -> str:
     )
 
 
-def _deep_research_cell(row: dict[str, Any]) -> str:
+def _deep_research_cell(
+    row: dict[str, Any], action_usage: dict[str, Any] | None = None
+) -> str:
     person_id = int(row.get("person_id") or 0)
     request_status = str(row.get("dr_request_status") or "idle")
     classification = str(row.get("dr_classification_status") or "")
@@ -3157,8 +3207,13 @@ def _deep_research_cell(row: dict[str, Any]) -> str:
     )
     error = str(row.get("dr_last_error") or "")
     error_html = f'<small class="deep-error">{_escape(error)}</small>' if request_status == "failed" and error else ""
+    usage_html = (
+        f'<small class="ai-action-usage">AI usage: {_escape(_format_action_usage(action_usage or {}))}</small>'
+        if action_usage and int(action_usage.get("call_count") or 0)
+        else ""
+    )
     if not has_result:
-        return f'<div class="deep-research-cell">{button}{progress}{error_html}</div>'
+        return f'<div class="deep-research-cell">{button}{progress}{usage_html}{error_html}</div>'
 
     researched_at = str(row.get("dr_researched_at") or "").replace("T", " ").replace("+00:00", " UTC")
     customer_page_status = row.get("dr_servicenow_customer_page_found")
@@ -3207,7 +3262,7 @@ def _deep_research_cell(row: dict[str, Any]) -> str:
         f'{_status_pill(label, tone)}'
         f'<small>{confidence}% confidence · {int(row.get("dr_relevant_sources") or 0)} sources</small>'
         f'<small>Last researched: {_escape(researched_at.split(" ", 1)[0])}</small>'
-        f'{details}{button}{progress}{error_html}'
+        f'{details}{button}{progress}{usage_html}{error_html}'
         '</div>'
     )
 
@@ -3258,7 +3313,7 @@ def _simplified_results_table(rows: list[dict[str, Any]]) -> str:
               <td>{_status_pill(partner_label, 'info') if partner_label != '—' else '<span class="no-action">—</span>'}</td>
               <td>{_status_pill(opportunity_label, 'success') if opportunity_label != '—' else '<span class="no-action">—</span>'}</td>
               <td>{_deep_research_cell(row)}</td>
-              <td><details class="row-evidence"><summary class="button row-action">View evidence</summary><div class="evidence-panel"><h3>{company}</h3>{evidence_html}</div></details></td>
+              <td><div class="row-action-group"><details class="row-evidence"><summary class="button row-action">View evidence</summary><div class="evidence-panel"><h3>{company}</h3>{evidence_html}</div></details>{_usage_info_button(row)}</div></td>
             </tr>"""
         )
     if not body:
@@ -3779,6 +3834,8 @@ def _page(request: Request, selected_run: int | None = None) -> str:
         selected_run = int(summaries[0]["id"])
     rows = DATABASE.report_rows(selected_run) if selected_run else []
     run = DATABASE.run(selected_run) if selected_run else None
+    metrics_loader = getattr(DATABASE, "ai_metrics_summary", None)
+    ai_summary = metrics_loader(selected_run) if selected_run and callable(metrics_loader) else {}
 
     relationships = [
         _relationship(row, parse_n8n_evidence(str(row.get("n8n_status") or ""), str(row.get("n8n_response") or "")))
@@ -3822,6 +3879,10 @@ def _page(request: Request, selected_run: int | None = None) -> str:
             <div class="metric-card verified"><strong class="metric-value">{verified_count}</strong><span class="metric-label">Verified Customers</span></div>
             <div class="metric-card"><strong class="metric-value">{partner_count}</strong><span class="metric-label">Partner Accounts</span></div>
             <div class="metric-card"><strong class="metric-value">{opportunity_count}</strong><span class="metric-label">Opportunities</span></div>
+            <div class="metric-card"><strong class="metric-value">{int(ai_summary.get('call_count') or 0):,}</strong><span class="metric-label">AI Calls</span></div>
+            <div class="metric-card"><strong class="metric-value">{int(ai_summary.get('total_tokens') or 0):,}</strong><span class="metric-label">AI Tokens</span></div>
+            <div class="metric-card"><strong class="metric-value">{_format_metric_duration(ai_summary.get('model_latency_ms'))}</strong><span class="metric-label">Total Model Latency</span></div>
+            <div class="metric-card"><strong class="metric-value">{_format_metric_cost(ai_summary)}</strong><span class="metric-label">Estimated AI Cost</span></div>
           </section>"""
         options = "".join(
             f'<option value="{item["id"]}" {"selected" if int(item["id"]) == selected_run else ""}>'
@@ -3911,6 +3972,25 @@ def _page(request: Request, selected_run: int | None = None) -> str:
           </section>"""
 
     run_log = _escape(run.get("collection_log")) if run and run.get("collection_log") else ""
+    ai_record_rows = "".join(
+        "<tr>"
+        f"<td>{_escape(item.get('person_name') or item.get('company_name') or 'Run-level')}</td>"
+        f"<td>{int(item.get('call_count') or 0)}</td>"
+        f"<td>{int(item.get('total_tokens') or 0):,}</td>"
+        f"<td>{_format_metric_duration(item.get('model_latency_ms'))}</td>"
+        f"<td>{_format_metric_cost(item)}</td>"
+        "</tr>"
+        for item in ai_summary.get("records", [])
+    )
+    ai_details = (
+        f'<details class="run-log"><summary>AI usage by record</summary>'
+        f'<div class="table-scroll"><table><thead><tr><th>Record</th><th>Calls</th>'
+        f'<th>Tokens</th><th>Model latency</th><th>Estimated cost</th></tr></thead>'
+        f'<tbody>{ai_record_rows}</tbody></table></div>'
+        f'<p class="muted">Cost is based on the configured per-token and web-search rates. '
+        f'An asterisk means one or more calls were unpriced.</p></details>'
+        if ai_record_rows else ""
+    )
     advanced = f"""
       <details class="advanced">
         <summary>Advanced options</summary>
@@ -3922,6 +4002,7 @@ def _page(request: Request, selected_run: int | None = None) -> str:
             <form method="post" action="/database/clear" onsubmit="return confirm('Delete every local customer list and result? This cannot be undone.');"><button class="danger">Clear saved data</button></form>
           </div>
           {f'<details class="run-log"><summary>View activity details</summary><pre>{run_log}</pre></details>' if run_log else ''}
+          {ai_details}
         </div>
       </details>"""
 
@@ -4169,8 +4250,13 @@ def ai_resolve_company(
         require_headquarters=True,
 
         require_grounding=True,
+        metrics_callback=_metric_recorder(DATABASE, actual_run_id, person_id),
 
     )
+    action_usage = DATABASE.ai_metrics_summary_for_person(
+        person_id, operation_prefix="company_resolution", latest_only=True
+    )
+    run_usage = DATABASE.ai_metrics_summary(actual_run_id)
 
 
 
@@ -4185,6 +4271,8 @@ def ai_resolve_company(
                 "success": False,
 
                 "error": result.get("error") or "Could not determine company name via web search.",
+                "usage": action_usage,
+                "run_usage": run_usage,
 
             },
 
@@ -4259,6 +4347,8 @@ def ai_resolve_company(
                 "source_urls": result.get("source_urls", []),
 
                 "message": f"Resolved and approved company: {company}",
+                "usage": action_usage,
+                "run_usage": run_usage,
 
             }
 
@@ -4293,6 +4383,8 @@ def ai_resolve_company(
             "reason": result.get("reason", ""),
 
             "source_urls": result.get("source_urls", []),
+            "usage": action_usage,
+            "run_usage": run_usage,
 
         }
 
@@ -4330,6 +4422,10 @@ def _run_deep_research_task(database: WorkflowDatabase, person_id: int, settings
             timeout_seconds=settings.deep_research_request_timeout_seconds,
             max_retries=settings.gemini_max_retries,
             retry_base_seconds=settings.gemini_retry_base_seconds,
+            metrics_callback=_metric_recorder(
+                database, int(person["run_id"]), person_id
+            ),
+            pricing=pricing_from_settings(settings),
         )
         crawler = BoundedOfficialCrawler(
             max_pages=settings.deep_research_max_pages,
@@ -4365,6 +4461,13 @@ def get_deep_research(person_id: int) -> JSONResponse:
             content={"success": False, "error": "Person record not found."},
         )
     research = DATABASE.deep_research(person_id) or {"request_status": "idle"}
+    action_usage = DATABASE.ai_metrics_summary_for_person(
+        person_id,
+        operation_prefix="deep_research.",
+        since=str(research.get("started_at") or ""),
+    )
+    record_usage = DATABASE.ai_metrics_summary_for_person(person_id)
+    run_usage = DATABASE.ai_metrics_summary(int(person["run_id"]))
     cell_html = ""
     if research.get("request_status") == "completed":
         row = next(
@@ -4376,12 +4479,15 @@ def get_deep_research(person_id: int) -> JSONResponse:
             None,
         )
         if row:
-            cell_html = _deep_research_cell(row)
+            cell_html = _deep_research_cell(row, action_usage)
     return JSONResponse(
         content={
             "success": True,
             "research": research,
             "cell_html": cell_html,
+            "usage": action_usage,
+            "record_usage": record_usage,
+            "run_usage": run_usage,
         }
     )
 
@@ -4454,6 +4560,9 @@ def start_deep_research(
             base_url=settings.llm_base_url,
             model=settings.llm_model,
             provider=settings.llm_provider,
+            metrics_callback=_metric_recorder(
+                DATABASE, int(person["run_id"]), person_id
+            ),
         )
         candidate_domain = str(domain_result.get("company_domain") or "").strip()
         try:
@@ -4726,6 +4835,33 @@ def run_progress(run_id: int) -> dict[str, Any]:
 
 
     return _run_progress(run_id)
+
+
+@app.get("/api/runs/{run_id}/ai-metrics")
+def run_ai_metrics(run_id: int) -> dict[str, Any]:
+    if not DATABASE.run(run_id):
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {
+        "summary": DATABASE.ai_metrics_summary(run_id),
+        "calls": DATABASE.ai_metrics(run_id),
+    }
+
+
+@app.get("/api/people/{person_id}/ai-metrics")
+def person_ai_metrics(person_id: int) -> dict[str, Any]:
+    person = DATABASE.person(person_id)
+    if not person:
+        raise HTTPException(status_code=404, detail="Person record not found")
+    return {
+        "person": {
+            "id": person_id,
+            "person_name": person.get("person_name") or "",
+            "company_name": person.get("company_name") or "",
+        },
+        "summary": DATABASE.ai_metrics_summary_for_person(person_id),
+        "calls": DATABASE.ai_metrics_for_person(person_id),
+        "run_summary": DATABASE.ai_metrics_summary(int(person["run_id"])),
+    }
 
 
 
