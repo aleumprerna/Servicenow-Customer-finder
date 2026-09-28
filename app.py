@@ -3135,7 +3135,9 @@ def _deep_research_evidence_list(items: Any, empty_copy: str) -> str:
         safe_url = url if url.startswith(("https://", "http://")) else ""
         citation_grounded = item.get("citation_grounded") is True
         title = _escape(item.get("page_title") or url or "Source")
-        source_tag = "Official" if item.get("official_source") else "External"
+        source_tag = str(item.get("source_type") or (
+            "Official" if item.get("official_source") else "External"
+        ))
         strength = str(item.get("strength") or "weak").capitalize()
         link = (
             f'<a href="{_escape(safe_url)}" target="_blank" rel="noopener noreferrer">{title}</a>'
@@ -3147,10 +3149,28 @@ def _deep_research_evidence_list(items: Any, empty_copy: str) -> str:
             if citation_grounded
             else '<span class="muted">Citation not verified; run research again.</span>'
         )
+        reason_html = (
+            f'<p><strong>Reason:</strong> {_escape(item.get("reason"))}</p>'
+            if item.get("reason")
+            else ""
+        )
+        raw_modules = item.get("modules")
+        module_names = (
+            [str(module).strip() for module in raw_modules if str(module).strip()]
+            if isinstance(raw_modules, list)
+            else []
+        )
+        modules_html = (
+            f'<p><strong>ServiceNow modules:</strong> {_escape(", ".join(module_names))}</p>'
+            if module_names
+            else ""
+        )
         cards.append(
             '<li class="deep-source">'
             f'<div>{link}<span class="source-tags"><span>{source_tag}</span><span>{_escape(strength)}</span></span></div>'
             f'<p>{_escape(item.get("evidence") or "No excerpt available.")}</p>'
+            f'{modules_html}'
+            f'{reason_html}'
             f'{citation_note}'
             '</li>'
         )
@@ -4570,6 +4590,12 @@ def _run_deep_research_task(database: WorkflowDatabase, person_id: int, settings
         "apollo_company_name": row.get("apollo_company_name"),
         "company_linkedin_url": row.get("company_linkedin_url"),
     }
+    try:
+        raw_input = json.loads(str(person.get("raw_input") or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        raw_input = {}
+    if isinstance(raw_input, dict) and "technographic_servicenow" in raw_input:
+        context["technographic_servicenow"] = raw_input.get("technographic_servicenow")
     try:
         provider = LLMResearchProvider(
             str(settings.llm_api_key or ""),

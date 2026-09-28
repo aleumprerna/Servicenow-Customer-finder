@@ -50,6 +50,29 @@ MEDIUM_CUSTOMER_RE = re.compile(
     re.IGNORECASE,
 )
 
+MODULE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("ITSM", re.compile(r"\b(?:ITSM|IT Service Management)\b", re.I)),
+    ("ITOM", re.compile(r"\b(?:ITOM|IT Operations Management)\b", re.I)),
+    ("CSM", re.compile(r"\b(?:CSM|Customer Service Management)\b", re.I)),
+    ("HRSD", re.compile(r"\b(?:HRSD|HR Service Delivery)\b", re.I)),
+    ("SPM", re.compile(r"\b(?:SPM|Strategic Portfolio Management)\b", re.I)),
+    ("PPM", re.compile(r"\b(?:PPM|Project Portfolio Management)\b", re.I)),
+    ("SecOps", re.compile(r"\b(?:SecOps|Security Operations)\b", re.I)),
+    ("IRM/GRC", re.compile(r"\b(?:IRM|GRC|Integrated Risk Management|Governance,? Risk(?:,? and)? Compliance)\b", re.I)),
+    ("App Engine", re.compile(r"\bApp Engine\b", re.I)),
+    ("Service Portal", re.compile(r"\bService Portal\b", re.I)),
+    ("IntegrationHub", re.compile(r"\bIntegration\s*Hub\b", re.I)),
+    ("CMDB", re.compile(r"\b(?:CMDB|Configuration Management Database)\b", re.I)),
+    ("Discovery", re.compile(r"\bServiceNow Discovery\b", re.I)),
+    ("SAM", re.compile(r"\b(?:SAM|Software Asset Management)\b", re.I)),
+    ("HAM", re.compile(r"\b(?:HAM|Hardware Asset Management)\b", re.I)),
+)
+
+
+def extract_modules(text: str) -> list[str]:
+    normalized = " ".join(str(text or "").split())
+    return [name for name, pattern in MODULE_PATTERNS if pattern.search(normalized)]
+
 
 def is_official_url(url: str, official_domain: str) -> bool:
     hostname = (urlsplit(url).hostname or "").lower().rstrip(".")
@@ -103,6 +126,7 @@ def evidence_snippets(
                 url=url,
                 page_title=page_title or url,
                 evidence=snippet,
+                modules=extract_modules(snippet),
                 evidence_type=evidence_type,
                 strength=strength,
                 category=category,
@@ -121,6 +145,18 @@ def normalize_model_finding(raw: dict[str, object], official_domain: str) -> Evi
     if not url or not evidence:
         return None
     category, strength, evidence_type = classify_text(evidence)
+    raw_evidence_type = str(raw.get("evidence_type") or "").strip().casefold()
+    source_type = str(raw.get("source_type") or "OpenAI web search")
+    target_implementation = (
+        raw_evidence_type == "third_party_target_implementation"
+        and str(raw.get("category") or "").upper() == "CUSTOMER_EVIDENCE"
+        and source_type.casefold() in {
+            "linkedin implementation post",
+            "partner page",
+            "servicenow official website",
+            "web search result",
+        }
+    )
     if category in {EvidenceCategory.IRRELEVANT, EvidenceCategory.AMBIGUOUS}:
         try:
             model_category = EvidenceCategory(str(raw.get("category") or "AMBIGUOUS").upper())
@@ -135,15 +171,32 @@ def normalize_model_finding(raw: dict[str, object], official_domain: str) -> Evi
         elif category == EvidenceCategory.IRRELEVANT:
             category, strength = EvidenceCategory.AMBIGUOUS, EvidenceStrength.WEAK
         evidence_type = str(raw.get("evidence_type") or evidence_type or "model_classified_reference")
-    # Deterministic partner detection always wins over a model's customer label.
-    if PARTNER_RE.search(evidence) and not INTERNAL_OWNERSHIP_RE.search(evidence):
+    # A grounded third-party go-live/implementation announcement that explicitly
+    # names the target is customer evidence about the target, even though the
+    # publisher is an implementation partner. Generic partner marketing remains
+    # partner evidence.
+    if target_implementation:
+        category = EvidenceCategory.CUSTOMER_EVIDENCE
+        strength = EvidenceStrength.STRONG
+        evidence_type = "third_party_target_implementation"
+    elif PARTNER_RE.search(evidence) and not INTERNAL_OWNERSHIP_RE.search(evidence):
         category = EvidenceCategory.PARTNER_EVIDENCE
         strength = EvidenceStrength.STRONG
         evidence_type = "partner_or_service_provider"
+    raw_modules = raw.get("modules")
+    model_modules = (
+        [str(item) for item in raw_modules if str(item).strip()]
+        if isinstance(raw_modules, list)
+        else []
+    )
+    modules = list(dict.fromkeys(extract_modules(evidence) + model_modules))
     return EvidenceFinding(
         url=url,
         page_title=str(raw.get("page_title") or raw.get("title") or url),
         evidence=evidence,
+        reason=str(raw.get("reason") or ""),
+        source_type=source_type,
+        modules=modules,
         evidence_type=evidence_type,
         strength=strength,
         category=category,

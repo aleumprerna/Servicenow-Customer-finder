@@ -1,5 +1,7 @@
 # ServiceNow Customer Checker
 
+For a complete step-by-step explanation of every workflow source, evidence rule, URL safeguard, module signal, and confidence calculation, see [SOURCES_AND_WORKFLOW.md](SOURCES_AND_WORKFLOW.md).
+
 This application enriches companies with Apollo headquarters data, attaches Playwright to an already-open and manually authenticated Chrome session, searches the ServiceNow Customer Information form, and checkpoints every result to CSV.
 
 ## Local workflow UI: people → ServiceNow → n8n
@@ -48,6 +50,8 @@ The callback URL must be reachable from n8n. For n8n running in Docker on the sa
 ### Start the UI
 
 Install the updated requirements once, then start the server:
+
+
 
 ```powershell
 cd C:\servicenow-partner-finder

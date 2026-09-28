@@ -22,6 +22,7 @@ from services.servicenow_deep_research.customer_page import (
 )
 from services.servicenow_deep_research.evidence_extractor import (
     evidence_snippets,
+    extract_modules,
     normalize_model_finding,
 )
 from services.servicenow_deep_research.research_service import (
@@ -62,6 +63,13 @@ def test_strong_official_internal_use_is_confirmed() -> None:
     assert result.status == ResearchClassification.CONFIRMED_CUSTOMER
     assert result.confidence >= 90
     assert len(result.customer_evidence) == 1
+
+
+def test_servicenow_modules_are_extracted_only_when_named() -> None:
+    assert extract_modules(
+        "The company went live with ServiceNow SPM and IT Service Management."
+    ) == ["ITSM", "SPM"]
+    assert extract_modules("The company uses the ServiceNow platform.") == []
 
 
 def test_grounded_official_servicenow_story_is_confirmed() -> None:
@@ -118,6 +126,32 @@ def test_model_cannot_lower_official_servicenow_story_confidence() -> None:
     assert "official ServiceNow customer story" in result.summary
 
 
+def test_generic_servicenow_customer_directory_url_is_never_evidence() -> None:
+    result = classify_evidence(
+        company_name="Harbour Energy plc",
+        official_domain="harbourenergy.com",
+        findings=[
+            EvidenceFinding(
+                url="https://www.servicenow.com/customers.html",
+                page_title="ServiceNow Customer Stories",
+                evidence="The directory search returned Harbour Energy Services Limited.",
+                evidence_type="official_servicenow_customer_directory_match",
+                strength="strong",
+                category="CUSTOMER_EVIDENCE",
+                citation_grounded=True,
+            )
+        ],
+        sources_checked=1,
+        research_depth="deep",
+        model_provider="test",
+    )
+
+    assert result.status == ResearchClassification.NO_OFFICIAL_EVIDENCE
+    assert result.confidence == 0
+    assert result.relevant_sources == 0
+    assert result.customer_evidence == []
+
+
 def test_partner_only_evidence_never_becomes_customer_evidence() -> None:
     result = _result_for(
         "We are an Elite ServiceNow Partner providing ServiceNow implementation services for our clients."
@@ -147,6 +181,43 @@ def test_service_provider_using_servicenow_for_clients_is_partner_only() -> None
 
     assert result.status == ResearchClassification.PARTNER_ONLY
     assert not result.customer_evidence
+
+
+def test_named_partner_go_live_for_target_is_customer_evidence() -> None:
+    finding = normalize_model_finding(
+        {
+            "url": "https://www.linkedin.com/posts/capture-group_mol-servicenowspm-golive-123",
+            "page_title": "Successful SPM Go-Live at MOL Group",
+            "evidence": (
+                "Together with MOL Group, we celebrated the successful go-live of our "
+                "ServiceNow SPM implementation project."
+            ),
+            "reason": "The partner explicitly identifies MOL Group as the SPM implementation customer.",
+            "source_type": "LinkedIn implementation post",
+            "modules": ["SPM"],
+            "evidence_type": "third_party_target_implementation",
+            "strength": "strong",
+            "category": "CUSTOMER_EVIDENCE",
+        },
+        "molgroup.info",
+    )
+
+    assert finding is not None
+    assert finding.category == "CUSTOMER_EVIDENCE"
+    assert finding.evidence_type == "third_party_target_implementation"
+    assert finding.modules == ["SPM"]
+
+    result = classify_evidence(
+        company_name="MOL Group",
+        official_domain="molgroup.info",
+        findings=[finding.model_copy(update={"citation_grounded": True})],
+        sources_checked=1,
+        research_depth="deep",
+        model_provider="test",
+    )
+    assert result.status == ResearchClassification.LIKELY_CUSTOMER
+    assert len(result.customer_evidence) == 1
+    assert result.partner_evidence == []
 
 
 def test_employee_access_to_company_servicenow_portal_is_customer_evidence() -> None:
@@ -372,7 +443,7 @@ def test_verified_servicenow_story_is_added_to_research_result() -> None:
     assert result.customer_evidence[0].evidence_type == "official_servicenow_customer_story"
 
 
-def test_servicenow_directory_yes_is_authoritative_when_story_fetch_is_unavailable() -> None:
+def test_servicenow_directory_match_is_not_evidence_when_story_fetch_is_unavailable() -> None:
     class Crawler:
         def crawl(self, _domain):
             return CrawlReport(findings=[], sources_checked=0, discovered_urls=[])
@@ -409,12 +480,10 @@ def test_servicenow_directory_yes_is_authoritative_when_story_fetch_is_unavailab
         },
     )
 
-    assert result.status == ResearchClassification.CONFIRMED_CUSTOMER
-    assert result.confidence == 100
-    assert result.relevant_sources == 1
-    assert result.customer_evidence[0].evidence_type == (
-        "official_servicenow_customer_directory_match"
-    )
+    assert result.status == ResearchClassification.NO_OFFICIAL_EVIDENCE
+    assert result.confidence == 0
+    assert result.relevant_sources == 0
+    assert result.customer_evidence == []
     assert result.servicenow_customer_page_found is None
 
 
@@ -475,6 +544,10 @@ def test_openai_discovery_is_official_domain_scoped_and_source_grounded() -> Non
     assert calls[0]["tools"][0]["filters"] == {"allowed_domains": ["example.com"]}
     assert calls[0]["include"] == ["web_search_call.action.sources"]
     assert calls[0]["text"]["format"]["type"] == "json_schema"
+    required = calls[0]["text"]["format"]["schema"]["properties"]["findings"]["items"]["required"]
+    assert "reason" in required
+    assert "source_type" in required
+    assert "modules" in required
     assert [finding.url for finding in discovery.findings] == ["https://example.com/technology"]
     assert discovery.findings[0].citation_grounded is True
 
@@ -512,6 +585,42 @@ def test_kie_discovery_adds_configured_reasoning_effort() -> None:
     assert calls[0]["reasoning"] == {"effort": "high"}
 
 
+def test_external_discovery_requests_linkedin_implementation_posts_and_exact_urls() -> None:
+    calls = []
+
+    class Response:
+        output_text = '{"findings":[]}'
+
+        def model_dump(self, **_kwargs):
+            return {"output": []}
+
+    class Responses:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return Response()
+
+    provider = object.__new__(OpenAIResearchProvider)
+    provider.model = "test-model"
+    provider.provider_name = "openai"
+    provider.supports_hosted_web_search = True
+    provider.client = SimpleNamespace(responses=Responses())
+
+    provider.discover(
+        company_name="MOL Group",
+        official_domain="molgroup.info",
+        existing_context={},
+        official_only=False,
+    )
+
+    prompt = calls[0]["input"]
+    assert "LinkedIn posts" in prompt
+    assert "go-live" in prompt
+    assert "SPM" in prompt
+    assert "exact individual\nLinkedIn post URL" in prompt
+    assert "Never return that generic page as evidence" in prompt
+    assert calls[0]["tools"][0]["type"] == "web_search"
+
+
 def test_provider_rejects_model_urls_when_grounding_metadata_is_missing() -> None:
     payload = {
         "findings": [
@@ -543,6 +652,8 @@ def test_provider_stores_the_authoritative_grounding_url() -> None:
                 "url": "https://example.com/evidence?utm_source=gemini",
                 "page_title": "Evidence",
                 "evidence": "We use ServiceNow internally for IT operations.",
+                "reason": "This explicitly states internal use.",
+                "source_type": "Company website",
                 "evidence_type": "explicit_internal_usage",
                 "strength": "strong",
                 "category": "CUSTOMER_EVIDENCE",
@@ -559,6 +670,8 @@ def test_provider_stores_the_authoritative_grounding_url() -> None:
 
     assert findings[0].url == "https://example.com/evidence"
     assert findings[0].citation_grounded is True
+    assert findings[0].reason == "This explicitly states internal use."
+    assert findings[0].source_type == "Company website"
 
 
 def test_google_grounding_redirect_is_expanded_to_publisher_url() -> None:
@@ -889,7 +1002,9 @@ def test_result_ui_shows_deep_research_action_and_evidence() -> None:
                 {
                     "url": "https://example.com/partners",
                     "page_title": "Our ServiceNow services",
-                    "evidence": "We help clients implement ServiceNow.",
+                    "evidence": "We help clients implement ServiceNow SPM.",
+                    "modules": ["SPM"],
+                    "reason": "The source describes an SPM implementation.",
                     "strength": "strong",
                     "official_source": True,
                     "citation_grounded": True,
@@ -910,6 +1025,8 @@ def test_result_ui_shows_deep_research_action_and_evidence() -> None:
     assert "View research" in html
     assert "Run again" in html
     assert "Official" in html
+    assert "ServiceNow modules:</strong> SPM" in html
+    assert "The source describes an SPM implementation." in html
     assert 'href="https://example.com/partners"' in html
 
 

@@ -35,6 +35,9 @@ class EvidenceFinding(BaseModel):
     url: str
     page_title: str = "Untitled source"
     evidence: str
+    reason: str = ""
+    source_type: str = ""
+    modules: list[str] = Field(default_factory=list)
     evidence_type: str = "generic_reference"
     strength: EvidenceStrength = EvidenceStrength.WEAK
     category: EvidenceCategory = EvidenceCategory.AMBIGUOUS
@@ -53,10 +56,19 @@ class EvidenceFinding(BaseModel):
             raise ValueError("Evidence URL must use HTTP or HTTPS")
         return parsed.geturl()
 
-    @field_validator("page_title", "evidence", "evidence_type")
+    @field_validator("page_title", "evidence", "reason", "source_type", "evidence_type")
     @classmethod
     def clean_text(cls, value: str) -> str:
         return " ".join(str(value or "").split())[:1200]
+
+    @field_validator("modules")
+    @classmethod
+    def clean_modules(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(
+            " ".join(str(item or "").split())[:100]
+            for item in value
+            if str(item or "").strip()
+        ))[:20]
 
 
 class ClassificationSuggestion(BaseModel):

@@ -40,6 +40,12 @@ FINDINGS_FORMAT = {
                             "url": {"type": "string"},
                             "page_title": {"type": "string"},
                             "evidence": {"type": "string"},
+                            "reason": {"type": "string"},
+                            "source_type": {"type": "string"},
+                            "modules": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
                             "evidence_type": {"type": "string"},
                             "strength": {"type": "string", "enum": ["strong", "medium", "weak"]},
                             "category": {
@@ -48,7 +54,8 @@ FINDINGS_FORMAT = {
                             },
                         },
                         "required": [
-                            "url", "page_title", "evidence", "evidence_type", "strength", "category"
+                            "url", "page_title", "evidence", "reason", "source_type", "modules",
+                            "evidence_type", "strength", "category"
                         ],
                         "additionalProperties": False,
                     },
@@ -101,33 +108,6 @@ class ResearchProviderError(DeepResearchError):
 class ProviderDiscovery:
     findings: list[EvidenceFinding]
     source_urls: set[str]
-
-
-def servicenow_directory_finding(
-    company_name: str, existing_context: dict[str, Any]
-) -> EvidenceFinding | None:
-    """Convert an observed ServiceNow customer-directory match into authoritative evidence."""
-
-    if str(existing_context.get("servicenow_customer") or "").strip().casefold() != "yes":
-        return None
-    matched_name = " ".join(
-        str(existing_context.get("servicenow_matched_name") or company_name).split()
-    )
-    score = str(existing_context.get("match_score") or "").strip()
-    score_detail = f" (name-match score {score}%)" if score else ""
-    return EvidenceFinding(
-        url="https://www.servicenow.com/customers.html",
-        page_title="ServiceNow Customer Stories",
-        evidence=(
-            f"ServiceNow's official customer search returned {matched_name} for "
-            f"{company_name}{score_detail}."
-        ),
-        evidence_type="official_servicenow_customer_directory_match",
-        strength="strong",
-        category="CUSTOMER_EVIDENCE",
-        official_source=False,
-        citation_grounded=True,
-    )
 
 
 def _response_source_urls(response: Any) -> set[str]:
@@ -372,12 +352,23 @@ class LLMResearchProvider:
         if not getattr(self, "supports_hosted_web_search", True):
             return ProviderDiscovery(findings=[], source_urls=set())
         scope = "Only use sources hosted on the official domain or its subdomains." if official_only else (
-            "Search in this strict order: (1) official ServiceNow customer stories and case studies "
-            "under servicenow.com, (2) the company's official website and current careers pages, "
-            "(3) current LinkedIn employees whose current role explicitly concerns ServiceNow, then "
-            "(4) credible implementation partners, press releases, or procurement sources. Exclude "
-            "Apollo, ZoomInfo, BuiltWith, 6sense, social forums, aggregators, and unsourced directories "
-            "as final proof. A missing public customer story is absence of evidence, not proof of non-use."
+            "Use OpenAI hosted web search (the configured OPENAI_API_KEY), not Serper. Search these "
+            "source groups: (1) general queries for the exact company name plus ServiceNow and module "
+            "queries such as ITSM, ITOM, CSM, and HRSD; (2) official ServiceNow customer stories and "
+            "partner pages on servicenow.com; (3) the company's official alliance, implementation, "
+            "technology, careers, and certification pages; (4) partner implementation pages, contracts, "
+            "procurement records, and technical documents; (5) LinkedIn posts from the target company, "
+            "ServiceNow, or an implementation partner that explicitly name the target company and a "
+            "ServiceNow implementation, collaboration, go-live, rollout, migration, or module such as "
+            "SPM, PPM, ITSM, ITOM, CSM, HRSD, SecOps, GRC/IRM, or App Engine; (6) indexed "
+            "DNS/certificate-transparency "
+            "records, including crt.sh, for relevant company subdomains; (7) publicly reachable pages "
+            "with ServiceNow fingerprints such as sysparm_, GlideRecord, or ServiceNow redirects; and "
+            "(8) public GitHub results containing api/now/table, sysparm_query, GlideRecord, or "
+            "SNOW_INSTANCE. Treat existing_context.technographic_servicenow=true as an additional weak "
+            "signal only, never standalone proof. Exclude Apollo, ZoomInfo, BuiltWith, 6sense, social "
+            "forums, aggregators, and unsourced directories as final proof. A missing public customer "
+            "story is absence of evidence, not proof of non-use."
         )
         prompt = f"""
 Research whether {company_name} is an end customer that internally uses ServiceNow.
@@ -387,16 +378,35 @@ Existing verification context: {json.dumps(existing_context, ensure_ascii=False)
 
 Separate end-customer evidence from partner, reseller, consulting, integrator, or client-delivery evidence.
 A ServiceNow partnership or implementing ServiceNow for clients NEVER proves internal customer usage.
+The generic ServiceNow customer directory URL https://www.servicenow.com/customers.html and a
+directory name-match score are discovery hints only. Never return that generic page as evidence and
+never use it to confirm customer status. A ServiceNow customer story counts only when its exact,
+company-specific story URL is present in search grounding metadata and identifies the target company.
 Validate that every finding belongs to the exact company. Do not confuse a parent, subsidiary,
 similarly named company, former employer, or partner with the target company. A current official
 company job posting that explicitly requires responsibility for its ServiceNow platform is customer
 evidence. LinkedIn evidence is valid only when ServiceNow is tied to the person's current role at
 the target company, not merely a skill, certification, former job, or old role.
+For LinkedIn posts, search combinations of the exact company name with ServiceNow, implemented,
+implementation, go-live, collaboration, rollout, and the module names above. Retain a post only when
+it explicitly identifies the target company as the implementation customer or participant. Capture
+the implemented module in the evidence and reason when stated. A partner's post about delivering a
+named implementation to the target is useful relevant external evidence; generic partner marketing
+or an implementation for an unnamed/different client is only partner evidence. Use the exact individual
+LinkedIn post URL from grounding metadata, never a profile, company feed, or search-results URL.
+Classify a post as CUSTOMER_EVIDENCE with evidence_type third_party_target_implementation when it
+explicitly says that the publisher implemented, launched, or took a named ServiceNow module live for
+the exact target company. The publisher being a partner does not make this PARTNER_EVIDENCE. Use
+PARTNER_EVIDENCE only for the publisher's own partnership, capabilities, services, certifications,
+or unnamed/different-client implementations.
 Return JSON only with this shape:
-{{"findings":[{{"url":"https://...","page_title":"...","evidence":"short factual excerpt or close paraphrase","evidence_type":"explicit_internal_usage|internal_role_or_platform_management|partner_or_service_provider|generic_reference","strength":"strong|medium|weak","category":"CUSTOMER_EVIDENCE|PARTNER_EVIDENCE|AMBIGUOUS"}}]}}
+{{"findings":[{{"url":"https://...","page_title":"...","evidence":"short factual excerpt or close paraphrase","reason":"why this evidence supports or does not support internal ServiceNow use","source_type":"Web search result|ServiceNow official website|Company website|LinkedIn implementation post|DNS or certificate transparency|Public HTTP fingerprint|GitHub public code|Technographic data|Contract or procurement|Partner page|Technical document|Job or certification","modules":["ITSM","SPM"],"evidence_type":"explicit_internal_usage|internal_role_or_platform_management|third_party_target_implementation|partner_or_service_provider|generic_reference","strength":"strong|medium|weak","category":"CUSTOMER_EVIDENCE|PARTNER_EVIDENCE|AMBIGUOUS"}}]}}
 For every finding, copy the exact URL of the search result that contains that finding's evidence.
 Never reconstruct, shorten, or guess a URL, and never attach evidence from one result to another
-result's URL. Do not invent URLs or evidence. Return an empty findings list when evidence is absent.
+result's URL. The reason must explain the evidence-to-conclusion link without adding unsupported
+facts. Do not invent URLs or evidence. Return an empty findings list when evidence is absent.
+Populate modules only with ServiceNow products/modules explicitly stated in the cited evidence.
+Use an empty modules array when the source does not name a module; never infer or guess one.
 """.strip()
         search_tool: dict[str, Any] = {"type": "web_search", "search_context_size": "high"}
         if official_only:
@@ -564,9 +574,6 @@ class DeepResearchService:
         context = dict(existing_context or {})
         findings = list(crawl_report.findings)
         visited_urls = list(dict.fromkeys(crawl_report.visited_urls))
-        directory_finding = servicenow_directory_finding(company, context)
-        if directory_finding is not None:
-            findings.append(directory_finding)
         discovered_source_urls: set[str] = set()
         sources_checked = crawl_report.sources_checked
         LOGGER.info("Deep research official crawl finished for %s (%s pages)", domain, sources_checked)
@@ -595,10 +602,10 @@ class DeepResearchService:
 
         findings = deduplicate_findings(findings)
         LOGGER.info("Deep research retained %s unique evidence findings for %s", len(findings), domain)
-        has_customer_signal = any(
-            item.category == EvidenceCategory.CUSTOMER_EVIDENCE for item in findings
-        )
-        if not has_customer_signal and provider_failed is None:
+        # External discovery always runs so implementation-partner and LinkedIn
+        # go-live posts are collected even when the official crawl already found
+        # customer evidence.
+        if provider_failed is None:
             try:
                 external = self.provider.discover(
                     company_name=company,
@@ -628,6 +635,8 @@ class DeepResearchService:
                         evidence=(
                             f"ServiceNow publishes an official customer story for {company}."
                         ),
+                        reason="An official ServiceNow customer story directly identifies the company as a customer.",
+                        source_type="ServiceNow official website",
                         evidence_type="official_servicenow_customer_story",
                         strength="strong",
                         category="CUSTOMER_EVIDENCE",
