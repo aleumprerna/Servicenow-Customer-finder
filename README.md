@@ -47,6 +47,25 @@ The outbound n8n payload contains `run_id`, `person_id`, `person_name`, `linkedi
 
 The callback URL must be reachable from n8n. For n8n running in Docker on the same computer, `http://host.docker.internal:8000` is normally the correct `APP_BASE_URL`. A hosted n8n instance needs a public/tunneled HTTPS address instead of `localhost`.
 
+### Microsoft sign-in sample
+
+1. In the Microsoft Entra admin center, open **App registrations**, create a registration, and record its Application (client) ID and Directory (tenant) ID.
+2. Under **Authentication**, add the **Web** redirect URI `http://localhost:8000/auth/callback`.
+3. Under **Certificates & secrets**, create a client secret for local development. Copy its **Value** immediately.
+4. Under **API permissions**, add the delegated Microsoft Graph permission `User.Read`. This is the basic-profile permission displayed on the consent screen.
+5. Add the following to `.env` and use a long random value for `SESSION_SECRET`:
+
+```dotenv
+MICROSOFT_CLIENT_ID=your-application-client-id
+MICROSOFT_CLIENT_SECRET=your-client-secret-value
+MICROSOFT_TENANT_ID=your-directory-tenant-id
+MICROSOFT_REDIRECT_URI=http://localhost:8000/auth/callback
+SESSION_SECRET=replace-with-a-long-random-value
+SESSION_HTTPS_ONLY=false
+```
+
+Start the server, then open [http://localhost:8000/login](http://localhost:8000/login). For production, use an HTTPS redirect URI, set `SESSION_HTTPS_ONLY=true`, and prefer a certificate or federated credential over a client secret.
+
 ### Start the UI
 
 Install the updated requirements once, then start the server:

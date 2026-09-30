@@ -3,11 +3,10 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from playwright.async_api import Browser, Playwright, async_playwright
-
-from browser.connection import find_servicenow_context
+if TYPE_CHECKING:
+    from playwright.async_api import Browser, Playwright
 
 
 LOGIN_URL_MARKERS = (
@@ -98,6 +97,8 @@ class LoginSessionMonitor:
     async def _run(self, cdp_url: str) -> None:
         browser: Browser | None = None
         try:
+            from playwright.async_api import async_playwright
+
             async with async_playwright() as playwright:
                 while self._stop_event and not self._stop_event.is_set():
                     if browser is None or not browser.is_connected():
@@ -119,6 +120,8 @@ class LoginSessionMonitor:
         return browser
 
     async def _inspect(self, browser: Browser) -> None:
+        from browser.connection import find_servicenow_context
+
         try:
             match = await find_servicenow_context(browser, allow_partner=True)
             if match:

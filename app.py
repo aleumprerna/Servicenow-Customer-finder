@@ -14,6 +14,8 @@ import logging
 
 import os
 
+import secrets
+
 from pathlib import Path
 
 from typing import Any
@@ -24,13 +26,19 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request
 
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 
+from dotenv import load_dotenv
+
+from starlette.middleware.sessions import SessionMiddleware
 
 
-from browser.servicenow import safe_filename
+
+from utils.filenames import safe_filename
 
 from browser.session_monitor import LoginSessionMonitor
 
 from config import PROJECT_ROOT, load_settings
+
+from microsoft_auth import router as microsoft_auth_router
 
 from services.ai_company_resolver import resolve_company_from_web, resolve_company_headquarters
 from services.ai_metrics import pricing_from_settings
@@ -78,7 +86,18 @@ LOGGER = logging.getLogger(__name__)
 
 LOGIN_MONITOR = LoginSessionMonitor()
 
+load_dotenv(PROJECT_ROOT / ".env")
+
 app = FastAPI(title="ServiceNow Partner Workflow", docs_url=None, redoc_url=None)
+
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.getenv("SESSION_SECRET") or secrets.token_urlsafe(32),
+    same_site="lax",
+    https_only=os.getenv("SESSION_HTTPS_ONLY", "false").strip().lower() in {"1", "true", "yes", "on"},
+)
+
+app.include_router(microsoft_auth_router)
 
 
 def _metric_recorder(

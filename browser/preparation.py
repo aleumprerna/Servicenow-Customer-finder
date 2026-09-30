@@ -24,6 +24,7 @@ from browser.connection import (
     connect_to_servicenow,
     find_servicenow_context,
 )
+from browser.errors import PreparationError
 
 
 SELECT2_SEARCH_INPUT = (
@@ -40,13 +41,6 @@ class PreparationState:
     status: str
     detail: str
     tone: str
-
-
-class PreparationError(RuntimeError):
-    def __init__(self, step: str, detail: str) -> None:
-        super().__init__(detail)
-        self.step = step
-        self.detail = detail
 
 
 async def prepare_existing_session(

@@ -8,4 +8,6 @@ pydantic>=2.9,<3
 fastapi>=0.115,<1
 uvicorn[standard]>=0.30,<1
 python-multipart>=0.0.12,<1
+msal>=1.31,<2
+itsdangerous>=2.2,<3
 openai>=1.0.0

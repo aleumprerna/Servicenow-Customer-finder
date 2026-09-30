@@ -11,11 +11,11 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import requests
 
-from browser.preparation import PreparationError, prepare_existing_session
+from browser.errors import PreparationError
 from browser.session_monitor import LoginSessionMonitor
 from clients.apollo import ApolloClient
 from config import PROJECT_ROOT, Settings, load_settings
@@ -526,6 +526,7 @@ async def _run_collection_in_process(
     output_path: Path,
     login_monitor: LoginSessionMonitor | None,
 ) -> str:
+    from browser.preparation import prepare_existing_session
     from main import automate_indices
     from playwright.async_api import async_playwright
 

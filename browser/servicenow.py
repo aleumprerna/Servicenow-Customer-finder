@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from pathlib import Path
 
 from playwright.async_api import Frame, Locator, Page, TimeoutError as PlaywrightTimeoutError, expect
@@ -10,6 +9,7 @@ from playwright.async_api import Frame, Locator, Page, TimeoutError as Playwrigh
 from models.company import CheckStatus, SearchResult
 from services.company_matcher import customer_search_name, find_best_match
 from services.country_normalizer import country_name, servicenow_country_value
+from utils.filenames import safe_filename
 
 
 LOGGER = logging.getLogger(__name__)
@@ -54,11 +54,6 @@ class SessionExpiredError(RuntimeError):
 
 class SearchTechnicalError(RuntimeError):
     pass
-
-
-def safe_filename(value: str) -> str:
-    normalized = re.sub(r"[^a-zA-Z0-9_-]+", "_", value.strip()).strip("_").lower()
-    return (normalized or "company")[:80]
 
 
 class ServiceNowChecker:
