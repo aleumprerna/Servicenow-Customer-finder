@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
+
+from browser.connection import find_servicenow_context
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, Playwright
@@ -79,6 +82,15 @@ class LoginSessionMonitor:
     async def start(self, cdp_url: str) -> None:
         if self._task and not self._task.done():
             return
+        # Uvicorn's Windows reload supervisor selects an event loop that cannot
+        # create the Playwright driver subprocess. Keep the web UI available and
+        # explain how to enable monitoring instead of leaking an orphaned task.
+        if sys.platform == "win32" and isinstance(asyncio.get_running_loop(), asyncio.SelectorEventLoop):
+            self._set_waiting(
+                False,
+                "ServiceNow monitor disabled in Windows reload mode; restart Uvicorn without --reload",
+            )
+            return
         self._stop_event = asyncio.Event()
         self._task = asyncio.create_task(self._run(cdp_url), name="servicenow-login-monitor")
 
@@ -120,8 +132,6 @@ class LoginSessionMonitor:
         return browser
 
     async def _inspect(self, browser: Browser) -> None:
-        from browser.connection import find_servicenow_context
-
         try:
             match = await find_servicenow_context(browser, allow_partner=True)
             if match:

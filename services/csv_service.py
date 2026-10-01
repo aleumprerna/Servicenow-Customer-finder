@@ -1,12 +1,11 @@
 from __future__ import annotations
 
+import csv
 import os
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
-
-import pandas as pd
 
 from models.company import CheckStatus, CompanyRecord
 
@@ -29,34 +28,67 @@ OUTPUT_COLUMNS = [
 OPTIONAL_INPUT_COLUMNS = ["domain", "country_override"]
 
 
+class _CellAccessor:
+    def __init__(self, frame: "_CSVFrame") -> None:
+        self._frame = frame
+
+    def __getitem__(self, key: tuple[int, str]) -> str:
+        index, column = key
+        return self._frame.rows[index].get(column, "")
+
+    def __setitem__(self, key: tuple[int, str], value: str) -> None:
+        index, column = key
+        if column not in self._frame.columns:
+            self._frame.columns.append(column)
+        self._frame.rows[index][column] = value
+
+
+class _CSVFrame:
+    """Minimal table interface used by CSVService and its callers."""
+
+    def __init__(self, columns: list[str], rows: list[dict[str, str]]) -> None:
+        self.columns = columns
+        self.rows = rows
+        self.at = _CellAccessor(self)
+
+
 class CSVService:
     def __init__(self, input_path: Path, output_path: Path) -> None:
         self.input_path = input_path
         self.output_path = output_path
         self.frame = self._load()
 
-    def _load(self) -> pd.DataFrame:
+    def _load(self) -> _CSVFrame:
         source = self.output_path if self.output_path.exists() else self.input_path
         if not source.exists():
             raise FileNotFoundError(f"Input CSV was not found: {self.input_path}")
-        frame = pd.read_csv(source, dtype=str, keep_default_na=False)
-        if "company_name" not in frame.columns:
+        with source.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            columns = list(reader.fieldnames or [])
+            rows = [
+                {key: "" if value is None else value for key, value in row.items() if key is not None}
+                for row in reader
+            ]
+        if "company_name" not in columns:
             raise ValueError("CSV must contain a company_name column")
-        if "linkedin_url" not in frame.columns:
-            frame["linkedin_url"] = ""
+        if "linkedin_url" not in columns:
+            columns.append("linkedin_url")
         for column in (*OUTPUT_COLUMNS, *OPTIONAL_INPUT_COLUMNS):
-            if column not in frame.columns:
-                frame[column] = "pending" if column == "check_status" else ""
+            if column not in columns:
+                columns.append(column)
+            default = "pending" if column == "check_status" else ""
+            for row in rows:
+                row.setdefault(column, default)
         ordered = OUTPUT_COLUMNS + OPTIONAL_INPUT_COLUMNS
-        extras = [column for column in frame.columns if column not in ordered]
-        return frame[ordered + extras]
+        extras = [column for column in columns if column not in ordered]
+        return _CSVFrame(ordered + extras, rows)
 
     def selected_indices(
         self, *, force: bool, company: str | None, limit: int | None
     ) -> list[int]:
         selected: list[int] = []
         company_key = company.casefold().strip() if company else None
-        for index, row in self.frame.iterrows():
+        for index, row in enumerate(self.frame.rows):
             if company_key and str(row["company_name"]).casefold().strip() != company_key:
                 continue
             if not force and str(row["check_status"]).strip() == CheckStatus.COMPLETED:
@@ -67,7 +99,7 @@ class CSVService:
         return selected
 
     def record(self, index: int) -> CompanyRecord:
-        row = self.frame.loc[index]
+        row = self.frame.rows[index]
         raw_score = str(row.get("match_score", "")).strip()
         raw_status = str(row.get("check_status", "pending")).strip() or "pending"
         try:
@@ -94,12 +126,8 @@ class CSVService:
 
     def update(self, index: int, **values: Any) -> None:
         for key, value in values.items():
-            if key not in self.frame.columns:
-                self.frame[key] = ""
             if isinstance(value, CheckStatus):
                 value = value.value
-            # The frame intentionally uses string dtype so identifiers and country
-            # codes round-trip exactly across pandas versions (including pandas 3).
             self.frame.at[index, key] = "" if value is None else str(value)
 
     def save(self) -> None:
@@ -110,7 +138,10 @@ class CSVService:
         os.close(descriptor)
         temp_path = Path(temp_name)
         try:
-            self.frame.to_csv(temp_path, index=False)
+            with temp_path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=self.frame.columns, extrasaction="ignore")
+                writer.writeheader()
+                writer.writerows(self.frame.rows)
             for attempt in range(20):
                 try:
                     os.replace(temp_path, self.output_path)
