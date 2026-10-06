@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio, base64, csv, hashlib, html, io, json, os, sqlite3
+import asyncio, base64, csv, hashlib, html, io, json, logging, os, sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
@@ -9,10 +9,14 @@ import msal
 import requests
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 SCOPES = ["User.Read", "Mail.Send"]
 GRAPH_SEND_URL = "https://graph.microsoft.com/v1.0/me/sendMail"
+N8N_BULK_RECEIPT_URL = "http://localhost:5678/webhook/show-params-webhook/"
+# Route login audit messages through Uvicorn's configured application logger so
+# INFO records are visible in the same terminal where the web app is running.
+LOGGER = logging.getLogger("uvicorn.error")
 
 
 @dataclass(frozen=True)
@@ -44,6 +48,34 @@ def microsoft_auth_settings() -> MicrosoftAuthSettings:
 def _fernet(settings: MicrosoftAuthSettings) -> Fernet:
     material = os.getenv("MICROSOFT_TOKEN_KEY", "").strip() or settings.client_secret
     return Fernet(base64.urlsafe_b64encode(hashlib.sha256(material.encode()).digest()))
+
+
+def _token_cache_summary(cache: str) -> dict[str, object]:
+    """Return useful MSAL cache diagnostics without exposing token credentials."""
+    try:
+        payload = json.loads(cache)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {"serialized_bytes": len(cache.encode()), "format": "unrecognized"}
+
+    credential_counts: dict[str, int] = {}
+    expiry_values: dict[str, list[str]] = {}
+    if isinstance(payload, dict):
+        for credential_type, entries in payload.items():
+            if not isinstance(entries, dict):
+                continue
+            credential_counts[str(credential_type)] = len(entries)
+            expiries = sorted({
+                str(entry.get("expires_on"))
+                for entry in entries.values()
+                if isinstance(entry, dict) and entry.get("expires_on")
+            })
+            if expiries:
+                expiry_values[str(credential_type)] = expiries
+    return {
+        "serialized_bytes": len(cache.encode()),
+        "credential_counts": credential_counts,
+        "expires_on": expiry_values,
+    }
 
 
 class EmailStore:
@@ -78,14 +110,60 @@ class EmailStore:
             CREATE TABLE IF NOT EXISTS microsoft_oauth_flows (
               state TEXT PRIMARY KEY, encrypted_payload TEXT NOT NULL,
               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE IF NOT EXISTS microsoft_account_data (
+              email TEXT PRIMARY KEY COLLATE NOCASE, parms TEXT NOT NULL,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
             """)
             conn.execute("DELETE FROM microsoft_oauth_flows WHERE created_at < datetime('now', '-15 minutes')")
+            conn.execute("""DELETE FROM microsoft_accounts
+                            WHERE id NOT IN (
+                              SELECT id FROM microsoft_accounts
+                              ORDER BY datetime(updated_at) DESC, id DESC LIMIT 1
+                            )""")
 
     def accounts(self) -> list[dict[str, object]]:
         self.initialize()
         with self.connect() as conn:
             return [dict(r) for r in conn.execute(
-                "SELECT id,email,display_name,tenant_id,connected_at FROM microsoft_accounts ORDER BY email")]
+                """SELECT a.id,a.email,a.display_name,a.tenant_id,a.connected_at,
+                          d.parms AS account_data,d.updated_at AS account_data_updated_at
+                   FROM microsoft_accounts a
+                   LEFT JOIN microsoft_account_data d ON d.email=a.email COLLATE NOCASE
+                   ORDER BY a.email""")]
+
+    def save_account_data(self, email: str, parms: object) -> bool:
+        self.initialize()
+        with self.connect() as conn:
+            account = conn.execute(
+                "SELECT 1 FROM microsoft_accounts WHERE email=? COLLATE NOCASE", (email,)
+            ).fetchone()
+            if not account:
+                return False
+            conn.execute(
+                """INSERT INTO microsoft_account_data(email,parms) VALUES(?,?)
+                   ON CONFLICT(email) DO UPDATE SET parms=excluded.parms,
+                   updated_at=CURRENT_TIMESTAMP""",
+                (email, json.dumps(parms, ensure_ascii=False)),
+            )
+        return True
+
+    def account_data(self, email: str) -> dict[str, object] | None:
+        self.initialize()
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT a.email,d.parms,d.created_at,d.updated_at
+                   FROM microsoft_accounts a
+                   LEFT JOIN microsoft_account_data d ON d.email=a.email COLLATE NOCASE
+                   WHERE a.email=? COLLATE NOCASE""",
+                (email,),
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["parms"] = json.loads(str(result["parms"])) if result["parms"] is not None else None
+        result["status"] = "success" if result["parms"] is not None else "no_data"
+        return result
 
     def account(self, account_id: int) -> dict[str, object] | None:
         self.initialize()
@@ -97,14 +175,45 @@ class EmailStore:
         self.initialize()
         email = str(claims.get("preferred_username") or claims.get("email") or "")
         name, tenant = str(claims.get("name") or email), str(claims.get("tid") or "")
+        cache_summary = _token_cache_summary(cache)
+        LOGGER.info(
+            "Microsoft token cache before encryption | email=%s | summary=%s",
+            email,
+            cache_summary,
+        )
         encrypted = _fernet(microsoft_auth_settings()).encrypt(cache.encode()).decode()
+        LOGGER.info(
+            "Microsoft token cache encrypted as one blob | email=%s | contains=%s | ciphertext_prefix=%s... | "
+            "ciphertext_length=%s | sha256=%s",
+            email,
+            cache_summary.get("credential_counts", {}),
+            encrypted[:24],
+            len(encrypted),
+            hashlib.sha256(encrypted.encode()).hexdigest(),
+        )
         with self.connect() as conn:
+            # This application intentionally supports one Microsoft sender only.
+            conn.execute("DELETE FROM microsoft_accounts WHERE home_account_id<>?", (home_id,))
             conn.execute("""INSERT INTO microsoft_accounts(home_account_id,email,display_name,tenant_id,token_cache)
               VALUES(?,?,?,?,?) ON CONFLICT(home_account_id) DO UPDATE SET email=excluded.email,
               display_name=excluded.display_name,tenant_id=excluded.tenant_id,token_cache=excluded.token_cache,
               updated_at=CURRENT_TIMESTAMP""", (home_id, email, name, tenant, encrypted))
-            row = conn.execute("SELECT id FROM microsoft_accounts WHERE home_account_id=?", (home_id,)).fetchone()
-            return int(row["id"])
+            row = conn.execute(
+                """SELECT id,email,display_name,tenant_id,connected_at,updated_at
+                   FROM microsoft_accounts WHERE home_account_id=?""",
+                (home_id,),
+            ).fetchone()
+            account = dict(row)
+
+        LOGGER.info(
+            "Microsoft login saved to DB | table=microsoft_accounts | record=%s",
+            {
+                **account,
+                "home_account_id": "<redacted>",
+                "token_cache": "<encrypted; redacted>",
+            },
+        )
+        return int(account["id"])
 
     def update_cache(self, account_id: int, cache: str) -> None:
         encrypted = _fernet(microsoft_auth_settings()).encrypt(cache.encode()).decode()
@@ -179,11 +288,39 @@ def _login_page(*, user: dict[str, str] | None = None, error: str = "", configur
                 accounts: list[dict[str, object]] | None = None) -> str:
     notice = f'<p class="message error">{html.escape(error)}</p>' if error else ""
     setup = "" if configured else '<p class="message error">Add Microsoft credentials from <code>.env.example</code> to <code>.env</code>.</p>'
-    items = "".join(f'<div class="account"><div><strong>{html.escape(str(a["display_name"]))}</strong><br><span class="muted">{html.escape(str(a["email"]))}</span></div><form method="post" action="/accounts/{a["id"]}/remove"><button class="danger">Remove</button></form></div>' for a in (accounts or []))
+    account_items = []
+    for account in accounts or []:
+        account_items.append(
+            f'<div class="account"><div><strong>{html.escape(str(account["display_name"]))}</strong><br>'
+            f'<span class="muted">{html.escape(str(account["email"]))}</span>'
+            f'<div class="muted account-api-response" data-email="{html.escape(str(account["email"]), quote=True)}">'
+            f'Loading saved API data...</div></div>'
+            f'<form method="post" action="/accounts/{account["id"]}/remove">'
+            f'<button class="danger">Remove</button></form></div>'
+        )
+    items = "".join(account_items)
+    signed_in_email = str(user.get("preferred_username") or user.get("email") or "") if user else ""
     current = (f'<h2>Welcome, {html.escape(user.get("name") or "Microsoft user")}</h2>'
-               f'<p>Signed in as <strong>{html.escape(user.get("preferred_username") or user.get("email") or "")}</strong>.</p>') if user else ""
+               f'<p>Signed in as <strong>{html.escape(signed_in_email)}</strong>.</p>') if user else ""
+    n8n_action = (f' <a class="button secondary" href="{N8N_BULK_RECEIPT_URL}?parms={quote(signed_in_email, safe="")}" '
+                  f'target="_blank" rel="noopener noreferrer">Send bulk receipt email with n8n</a>') if signed_in_email else ""
     disabled = ' aria-disabled="true" style="pointer-events:none;opacity:.5"' if not configured else ""
-    return _page(f'''{notice}<section class="card"><h1>Microsoft accounts</h1>{current}{setup}<p class="muted">Connect each sender separately. Passwords are never stored. The app will request permission to view your basic profile and send mail.</p><a class="button" href="/auth/microsoft"{disabled}>Sign in with Microsoft / connect another account</a> <a class="button secondary" href="/email">Open email workspace</a>{items or '<p class="muted">No accounts connected yet.</p>'}<p><a href="/logout">Sign out of this browser session</a></p></section>''', "Microsoft accounts")
+    sign_in_action = (f'<a class="button" href="/auth/microsoft"{disabled}>Sign in with Microsoft</a> ') if not user else ""
+    account_data_script = '''<script>
+document.querySelectorAll(".account-api-response").forEach(async (element) => {
+  const email = element.dataset.email;
+  try {
+    const response = await fetch(`/api/microsoft/account-data/${encodeURIComponent(email)}`);
+    const result = await response.json();
+    element.textContent = response.ok && result.parms !== null
+      ? `API response: ${JSON.stringify(result.parms)}`
+      : "API response: No stored data";
+  } catch (error) {
+    element.textContent = "API response: Unable to load data";
+  }
+});
+</script>'''
+    return _page(f'''{notice}<section class="card"><h1>Microsoft account</h1>{current}{setup}<p class="muted">Only one sender account can be connected. Passwords are never stored. The app will request permission to view your basic profile and send mail.</p>{sign_in_action}<a class="button secondary" href="/email">Open email workspace</a>{n8n_action}{items or '<p class="muted">No account connected yet.</p>'}<p><a href="/logout">Sign out of this browser session</a></p></section>{account_data_script}''', "Microsoft account")
 
 
 router = APIRouter()
@@ -242,6 +379,35 @@ async def microsoft_logout(request: Request):
 async def remove_account(account_id: int):
     STORE.delete_account(account_id)
     return RedirectResponse("/login", 303)
+
+
+@router.post("/api/microsoft/account-data")
+async def save_microsoft_account_data(request: Request):
+    try:
+        body = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        return JSONResponse({"error": "A JSON body is required."}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "The JSON body must be an object."}, status_code=400)
+    email = str(body.get("email") or "").strip()
+    if not email or "parms" not in body:
+        return JSONResponse({"error": "Both email and parms are required."}, status_code=422)
+    if not STORE.save_account_data(email, body["parms"]):
+        return JSONResponse({"error": "Connected Microsoft account not found."}, status_code=404)
+    return {
+        "status": "success",
+        "message": "Data successfully stored.",
+        "email": email,
+        "parms": body["parms"],
+    }
+
+
+@router.get("/api/microsoft/account-data/{email}")
+async def get_microsoft_account_data(email: str):
+    saved = STORE.account_data(email)
+    if not saved:
+        return JSONResponse({"error": "Account data not found."}, status_code=404)
+    return saved
 
 
 def _email_page(message: str = "", error: bool = False) -> str:
