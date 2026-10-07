@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-import asyncio, base64, csv, hashlib, html, io, json, logging, os, sqlite3
+import asyncio, base64, csv, hashlib, html, io, json, logging, os, sqlite3, subprocess
+from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
 import msal
 import requests
+import psycopg
+from psycopg.rows import dict_row
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -17,6 +20,36 @@ N8N_BULK_RECEIPT_URL = "http://localhost:5678/webhook/show-params-webhook/"
 # Route login audit messages through Uvicorn's configured application logger so
 # INFO records are visible in the same terminal where the web app is running.
 LOGGER = logging.getLogger("uvicorn.error")
+
+
+@lru_cache(maxsize=1)
+def _msal_db_password() -> str:
+    """Load the DB password without printing or persisting the EC2 secret locally."""
+    configured = os.getenv("MSAL_DB_PASSWORD", "").strip()
+    if configured:
+        return configured
+    key = os.getenv("MSAL_SSH_KEY", "").strip()
+    host = os.getenv("MSAL_SSH_HOST", "").strip()
+    container = os.getenv("MSAL_DB_CONTAINER", "outreachgpt-postgress_db-1").strip()
+    if not key or not host:
+        raise RuntimeError(
+            "Set MSAL_DB_PASSWORD, or configure MSAL_SSH_KEY and MSAL_SSH_HOST "
+            "to load it securely from EC2."
+        )
+    result = subprocess.run(
+        [
+            "ssh", "-i", key, "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+            host, "docker", "exec", container, "printenv", "POSTGRES_PASSWORD",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    password = result.stdout.strip()
+    if not password:
+        raise RuntimeError("EC2 PostgreSQL container returned an empty password")
+    return password
 
 
 @dataclass(frozen=True)
@@ -88,6 +121,29 @@ class EmailStore:
         connection.row_factory = sqlite3.Row
         return connection
 
+    @property
+    def uses_postgres_tokens(self) -> bool:
+        return bool(os.getenv("MSAL_DB_HOST", "").strip())
+
+    def connect_tokens(self) -> psycopg.Connection:
+        """Connect only to the remote MSAL token table through the SSH tunnel."""
+        return psycopg.connect(
+            host=os.getenv("MSAL_DB_HOST", "127.0.0.1"),
+            port=int(os.getenv("MSAL_DB_PORT", "5433")),
+            dbname=os.getenv("MSAL_DB_NAME", "outreachgpt"),
+            user=os.getenv("MSAL_DB_USER", "outreachgpt"),
+            password=_msal_db_password(),
+            connect_timeout=5,
+            row_factory=dict_row,
+        )
+
+    @property
+    def token_table(self) -> str:
+        schema = os.getenv("MSAL_DB_SCHEMA", "sales_agent").strip()
+        if not schema.replace("_", "").isalnum():
+            raise ValueError("MSAL_DB_SCHEMA must contain only letters, numbers, and underscores")
+        return f'"{schema}"."msal_tokens"'
+
     def initialize(self) -> None:
         with self.connect() as conn:
             conn.executescript("""
@@ -124,6 +180,25 @@ class EmailStore:
 
     def accounts(self) -> list[dict[str, object]]:
         self.initialize()
+        if self.uses_postgres_tokens:
+            with self.connect_tokens() as conn:
+                rows = conn.execute(
+                    f"SELECT id,email,display_name,tenant_id,connected_at "
+                    f"FROM {self.token_table} ORDER BY email"
+                ).fetchall()
+            with self.connect() as conn:
+                local_data = {
+                    str(row["email"]).casefold(): dict(row)
+                    for row in conn.execute("SELECT email,parms,updated_at FROM microsoft_account_data")
+                }
+            return [
+                {
+                    **dict(row),
+                    "account_data": local_data.get(str(row["email"]).casefold(), {}).get("parms"),
+                    "account_data_updated_at": local_data.get(str(row["email"]).casefold(), {}).get("updated_at"),
+                }
+                for row in rows
+            ]
         with self.connect() as conn:
             return [dict(r) for r in conn.execute(
                 """SELECT a.id,a.email,a.display_name,a.tenant_id,a.connected_at,
@@ -134,12 +209,19 @@ class EmailStore:
 
     def save_account_data(self, email: str, parms: object) -> bool:
         self.initialize()
+        if self.uses_postgres_tokens:
+            with self.connect_tokens() as token_conn:
+                account = token_conn.execute(
+                    f"SELECT 1 FROM {self.token_table} WHERE lower(email)=lower(%s)", (email,)
+                ).fetchone()
+        else:
+            with self.connect() as conn:
+                account = conn.execute(
+                    "SELECT 1 FROM microsoft_accounts WHERE email=? COLLATE NOCASE", (email,)
+                ).fetchone()
+        if not account:
+            return False
         with self.connect() as conn:
-            account = conn.execute(
-                "SELECT 1 FROM microsoft_accounts WHERE email=? COLLATE NOCASE", (email,)
-            ).fetchone()
-            if not account:
-                return False
             conn.execute(
                 """INSERT INTO microsoft_account_data(email,parms) VALUES(?,?)
                    ON CONFLICT(email) DO UPDATE SET parms=excluded.parms,
@@ -150,6 +232,25 @@ class EmailStore:
 
     def account_data(self, email: str) -> dict[str, object] | None:
         self.initialize()
+        if self.uses_postgres_tokens:
+            with self.connect_tokens() as token_conn:
+                account = token_conn.execute(
+                    f"SELECT email FROM {self.token_table} WHERE lower(email)=lower(%s)", (email,)
+                ).fetchone()
+            if not account:
+                return None
+            with self.connect() as conn:
+                row = conn.execute(
+                    "SELECT email,parms,created_at,updated_at FROM microsoft_account_data "
+                    "WHERE email=? COLLATE NOCASE", (email,)
+                ).fetchone()
+            result = dict(row) if row else {
+                "email": account["email"], "parms": None,
+                "created_at": None, "updated_at": None,
+            }
+            result["parms"] = json.loads(str(result["parms"])) if result["parms"] is not None else None
+            result["status"] = "success" if result["parms"] is not None else "no_data"
+            return result
         with self.connect() as conn:
             row = conn.execute(
                 """SELECT a.email,d.parms,d.created_at,d.updated_at
@@ -167,6 +268,12 @@ class EmailStore:
 
     def account(self, account_id: int) -> dict[str, object] | None:
         self.initialize()
+        if self.uses_postgres_tokens:
+            with self.connect_tokens() as conn:
+                row = conn.execute(
+                    f"SELECT * FROM {self.token_table} WHERE id=%s", (account_id,)
+                ).fetchone()
+                return dict(row) if row else None
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM microsoft_accounts WHERE id=?", (account_id,)).fetchone()
             return dict(row) if row else None
@@ -191,6 +298,32 @@ class EmailStore:
             len(encrypted),
             hashlib.sha256(encrypted.encode()).hexdigest(),
         )
+        if self.uses_postgres_tokens:
+            raw_user_id = os.getenv("MSAL_USER_ID", "").strip()
+            if not raw_user_id:
+                raise RuntimeError("MSAL_USER_ID is required to save into sales_agent.msal_tokens")
+            with self.connect_tokens() as conn:
+                conn.execute(
+                    f"DELETE FROM {self.token_table} WHERE home_account_id<>%s AND user_id=%s",
+                    (home_id, int(raw_user_id)),
+                )
+                row = conn.execute(
+                    f"""INSERT INTO {self.token_table}
+                    (home_account_id,email,display_name,tenant_id,token_cache,user_id)
+                    VALUES(%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(home_account_id) DO UPDATE SET
+                    email=excluded.email,display_name=excluded.display_name,
+                    tenant_id=excluded.tenant_id,token_cache=excluded.token_cache,
+                    user_id=excluded.user_id,updated_at=CURRENT_TIMESTAMP
+                    RETURNING id,email,display_name,tenant_id,connected_at,updated_at""",
+                    (home_id, email, name, tenant, encrypted, int(raw_user_id)),
+                ).fetchone()
+                account = dict(row)
+            LOGGER.info(
+                "Microsoft login saved to DB | table=sales_agent.msal_tokens | record=%s",
+                {**account, "home_account_id": "<redacted>", "token_cache": "<encrypted; redacted>"},
+            )
+            return int(account["id"])
         with self.connect() as conn:
             # This application intentionally supports one Microsoft sender only.
             conn.execute("DELETE FROM microsoft_accounts WHERE home_account_id<>?", (home_id,))
@@ -217,11 +350,22 @@ class EmailStore:
 
     def update_cache(self, account_id: int, cache: str) -> None:
         encrypted = _fernet(microsoft_auth_settings()).encrypt(cache.encode()).decode()
+        if self.uses_postgres_tokens:
+            with self.connect_tokens() as conn:
+                conn.execute(
+                    f"UPDATE {self.token_table} SET token_cache=%s,updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+                    (encrypted, account_id),
+                )
+            return
         with self.connect() as conn:
             conn.execute("UPDATE microsoft_accounts SET token_cache=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                          (encrypted, account_id))
 
     def delete_account(self, account_id: int) -> None:
+        if self.uses_postgres_tokens:
+            with self.connect_tokens() as conn:
+                conn.execute(f"DELETE FROM {self.token_table} WHERE id=%s", (account_id,))
+            return
         with self.connect() as conn:
             conn.execute("DELETE FROM microsoft_accounts WHERE id=?", (account_id,))
 
@@ -280,7 +424,7 @@ def _client(settings: MicrosoftAuthSettings, cache: msal.SerializableTokenCache 
 
 def _page(content: str, title: str = "Microsoft email") -> str:
     return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title><style>
-*{{box-sizing:border-box}}body{{margin:0;background:#f4f6fa;color:#172033;font-family:Segoe UI,Arial,sans-serif}}main{{width:min(1000px,calc(100% - 32px));margin:36px auto}}.card{{background:#fff;border:1px solid #dfe5ee;border-radius:14px;padding:24px;margin-bottom:18px;box-shadow:0 8px 30px #24324a12}}h1,h2{{margin-top:0}}label{{display:block;font-weight:650;margin:14px 0 6px}}input,textarea,select{{width:100%;padding:11px;border:1px solid #cbd3df;border-radius:8px;font:inherit}}textarea{{min-height:150px}}button,.button{{display:inline-block;border:0;border-radius:8px;background:#2563eb;color:#fff;padding:11px 16px;text-decoration:none;font-weight:700;cursor:pointer}}.secondary{{background:#354052}}.danger{{background:#b42318}}.row{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}.account{{display:flex;justify-content:space-between;align-items:center;gap:15px;padding:12px 0;border-top:1px solid #edf0f5}}.muted{{color:#687386}}.message{{padding:12px;border-radius:8px;background:#eaf7ee;color:#176b35}}.error{{background:#fff0f0;color:#9d1c1c}}nav{{display:flex;gap:10px;margin-bottom:18px}}@media(max-width:650px){{.row{{grid-template-columns:1fr}}}}
+*{{box-sizing:border-box}}body{{margin:0;background:#f4f6fa;color:#172033;font-family:Segoe UI,Arial,sans-serif}}main{{width:min(1000px,calc(100% - 32px));margin:36px auto}}.card{{background:#fff;border:1px solid #dfe5ee;border-radius:14px;padding:24px;margin-bottom:18px;box-shadow:0 8px 30px #24324a12}}h1,h2{{margin-top:0}}label{{display:block;font-weight:650;margin:14px 0 6px}}input,textarea,select{{width:100%;padding:11px;border:1px solid #cbd3df;border-radius:8px;font:inherit}}textarea{{min-height:150px}}button,.button{{display:inline-block;border:0;border-radius:8px;background:#2563eb;color:#fff;padding:11px 16px;text-decoration:none;font-weight:700;cursor:pointer}}.secondary{{background:#354052}}.danger{{background:#b42318}}.row{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}.account{{display:flex;justify-content:space-between;align-items:center;gap:15px;padding:18px 0;border-top:1px solid #edf0f5}}.account-actions{{display:flex;align-items:center;gap:10px;flex:0 0 auto}}.account-actions form{{margin:0}}.muted{{color:#687386}}.message{{padding:12px;border-radius:8px;background:#eaf7ee;color:#176b35}}.error{{background:#fff0f0;color:#9d1c1c}}nav{{display:flex;gap:10px;margin-bottom:18px}}@media(max-width:650px){{.row{{grid-template-columns:1fr}}.account{{align-items:flex-start;flex-direction:column}}.account-actions{{flex-wrap:wrap}}}}
 </style></head><body><main>{content}</main></body></html>'''
 
 
@@ -290,20 +434,23 @@ def _login_page(*, user: dict[str, str] | None = None, error: str = "", configur
     setup = "" if configured else '<p class="message error">Add Microsoft credentials from <code>.env.example</code> to <code>.env</code>.</p>'
     account_items = []
     for account in accounts or []:
+        account_email = str(account["email"])
         account_items.append(
             f'<div class="account"><div><strong>{html.escape(str(account["display_name"]))}</strong><br>'
-            f'<span class="muted">{html.escape(str(account["email"]))}</span>'
-            f'<div class="muted account-api-response" data-email="{html.escape(str(account["email"]), quote=True)}">'
+            f'<span class="muted">{html.escape(account_email)}</span>'
+            f'<div class="muted account-api-response" data-email="{html.escape(account_email, quote=True)}">'
             f'Loading saved API data...</div></div>'
-            f'<form method="post" action="/accounts/{account["id"]}/remove">'
-            f'<button class="danger">Remove</button></form></div>'
+            f'<div class="account-actions"><a class="button secondary" '
+            f'href="{N8N_BULK_RECEIPT_URL}?parms={quote(account_email, safe="")}" '
+            f'target="_blank" rel="noopener noreferrer">Connect to n8n</a>'
+            f'<form method="post" action="/accounts/{account["id"]}/remove" '
+            f'onsubmit="return confirm(\'Remove and sign out this Microsoft account?\')">'
+            f'<button class="danger">Remove</button></form></div></div>'
         )
     items = "".join(account_items)
     signed_in_email = str(user.get("preferred_username") or user.get("email") or "") if user else ""
     current = (f'<h2>Welcome, {html.escape(user.get("name") or "Microsoft user")}</h2>'
                f'<p>Signed in as <strong>{html.escape(signed_in_email)}</strong>.</p>') if user else ""
-    n8n_action = (f' <a class="button secondary" href="{N8N_BULK_RECEIPT_URL}?parms={quote(signed_in_email, safe="")}" '
-                  f'target="_blank" rel="noopener noreferrer">Send bulk receipt email with n8n</a>') if signed_in_email else ""
     disabled = ' aria-disabled="true" style="pointer-events:none;opacity:.5"' if not configured else ""
     sign_in_action = (f'<a class="button" href="/auth/microsoft"{disabled}>Sign in with Microsoft</a> ') if not user else ""
     account_data_script = '''<script>
@@ -320,7 +467,7 @@ document.querySelectorAll(".account-api-response").forEach(async (element) => {
   }
 });
 </script>'''
-    return _page(f'''{notice}<section class="card"><h1>Microsoft account</h1>{current}{setup}<p class="muted">Only one sender account can be connected. Passwords are never stored. The app will request permission to view your basic profile and send mail.</p>{sign_in_action}<a class="button secondary" href="/email">Open email workspace</a>{n8n_action}{items or '<p class="muted">No account connected yet.</p>'}<p><a href="/logout">Sign out of this browser session</a></p></section>{account_data_script}''', "Microsoft account")
+    return _page(f'''{notice}<section class="card"><h1>Microsoft account</h1>{current}{setup}{sign_in_action}<a class="button secondary" href="/email">Open email workspace</a>{items or '<p class="muted">No account connected yet.</p>'}</section>{account_data_script}''', "Microsoft account")
 
 
 router = APIRouter()
@@ -376,8 +523,9 @@ async def microsoft_logout(request: Request):
 
 
 @router.post("/accounts/{account_id}/remove")
-async def remove_account(account_id: int):
+async def remove_account(account_id: int, request: Request):
     STORE.delete_account(account_id)
+    request.session.clear()
     return RedirectResponse("/login", 303)
 
 

@@ -16,12 +16,12 @@ from microsoft_auth import (
 )
 
 
-def test_login_page_has_microsoft_action_and_permission_copy() -> None:
+def test_login_page_has_microsoft_action_without_removed_copy() -> None:
     page = _login_page(configured=True)
 
     assert 'href="/auth/microsoft"' in page
     assert "Sign in with Microsoft" in page
-    assert "permission to view your basic profile" in page
+    assert "permission to view your basic profile" not in page
     assert "connect another account" not in page
 
 
@@ -44,20 +44,24 @@ def test_signed_in_page_escapes_claims() -> None:
 
 def test_signed_in_page_links_to_n8n_with_encoded_account_email_in_new_tab() -> None:
     page = _login_page(
-        user={"name": "Sales Bot", "preferred_username": "salesbot@aelumconsulting.com"}
+        user={"name": "Sales Bot", "preferred_username": "salesbot@aelumconsulting.com"},
+        accounts=[{"id": 1, "display_name": "Sales Bot", "email": "salesbot@aelumconsulting.com"}],
     )
 
-    assert "Send bulk receipt email with n8n" in page
+    assert "Connect to n8n" in page
     assert f'href="{N8N_BULK_RECEIPT_URL}?parms=salesbot%40aelumconsulting.com"' in page
     assert 'target="_blank"' in page
     assert 'rel="noopener noreferrer"' in page
     assert 'href="/auth/microsoft"' not in page
+    assert 'action="/accounts/1/remove"' in page
+    assert ">Remove</button>" in page
+    assert "Sign out of this browser session" not in page
 
 
 def test_signed_out_page_does_not_show_n8n_action() -> None:
     page = _login_page(configured=True)
 
-    assert "Send bulk receipt email with n8n" not in page
+    assert "Connect to n8n" not in page
 
 
 def test_authority_uses_configured_tenant() -> None:
