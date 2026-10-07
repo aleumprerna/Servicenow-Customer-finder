@@ -1,1 +1,1 @@
-"""Local upload, collection, reporting, and n8n handoff workflow."""
+"""Local upload, collection, verification, and reporting workflow."""

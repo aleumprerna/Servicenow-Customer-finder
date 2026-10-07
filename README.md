@@ -4,7 +4,7 @@ For a complete step-by-step explanation of every workflow source, evidence rule,
 
 This application enriches companies with Apollo headquarters data, attaches Playwright to an already-open and manually authenticated Chrome session, searches the ServiceNow Customer Information form, and checkpoints every result to CSV.
 
-## Local workflow UI: people → ServiceNow → n8n
+## Local workflow UI: people → ServiceNow
 
 The project also includes a local web UI that adds a full workflow around the existing scraper:
 
@@ -13,39 +13,11 @@ The project also includes a local web UI that adds a full workflow around the ex
 3. Click **Enrich records**. The app resolves confirmed employers and runs Apollo organization enrichment without opening a browser.
 4. Click **Run instance**. It opens the ServiceNow deployment-registration URL in a Chrome remote-debugging profile. Log in and wait until the Customer Information form is visible.
 5. Click **Open ServiceNow**. Log in in the opened Chrome window; the app waits for the authenticated page and starts web automation automatically. The app uses the saved enrichment and stores the results in `data/workflow.db` (SQLite). **Start web automation** remains available for retrying a stopped or failed run.
-6. Every completed ServiceNow result with `servicenow_customer=No` is POSTed individually to n8n. `Yes`, `Unknown`, and technical failures are never sent.
-7. **Reports** in the UI joins the original person, company resolution, ServiceNow result, and n8n result. You can download the selected run as CSV.
+6. **Reports** in the UI joins the original person, company resolution, and ServiceNow result. You can download the selected run as CSV.
 
 SQLite is used by default because it requires no server or credentials. It is a local database file; moving to MySQL later only requires replacing the `WorkflowDatabase` repository layer.
 
 Your Apollo API key needs access to both **People Match** (to resolve the employer from the person's LinkedIn profile) and **Organization Enrichment/Search** (to obtain the organization's headquarters country).
-
-### Configure n8n
-
-Add these values to your existing `.env` file. Keep the existing Apollo and Chrome values too.
-
-```dotenv
-# The n8n production webhook that receives each verified ServiceNow "No" company.
-N8N_WEBHOOK_URL=https://your-n8n-host/webhook/servicenow-not-found
-
-# Address n8n can use to POST its final result back to this local Python app.
-APP_BASE_URL=http://localhost:8000
-
-# Optional protection for callbacks. If set, configure n8n to send this as X-Workflow-Token.
-N8N_CALLBACK_TOKEN=
-```
-
-The outbound n8n payload contains `run_id`, `person_id`, `person_name`, `linkedin_url`, `company_name`, Apollo/ServiceNow fields, and `callback_url`. To return a final n8n result, make an HTTP POST to the provided `callback_url` with JSON such as:
-
-```json
-{
-  "person_id": 123,
-  "n8n_status": "completed",
-  "message": "Contact created in downstream system"
-}
-```
-
-The callback URL must be reachable from n8n. For n8n running in Docker on the same computer, `http://host.docker.internal:8000` is normally the correct `APP_BASE_URL`. A hosted n8n instance needs a public/tunneled HTTPS address instead of `localhost`.
 
 ### Microsoft sign-in sample
 

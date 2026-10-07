@@ -8,12 +8,9 @@ import subprocess
 import sys
 import time
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-import requests
 
 from browser.errors import PreparationError
 from browser.session_monitor import LoginSessionMonitor
@@ -283,60 +280,6 @@ def sync_pipeline_results(database: WorkflowDatabase, run_id: int, output_path: 
     return count
 
 
-def n8n_payload(check: dict[str, Any], app_base_url: str) -> dict[str, Any]:
-    """Stable webhook contract; n8n can use person_id to send an async callback."""
-
-    return {
-        "event": "servicenow.customer_not_found",
-        "run_id": check["run_id"],
-        "person_id": check["person_id"],
-        "person_name": check["person_name"],
-        "linkedin_url": check["linkedin_url"],
-        "headline": check["headline"],
-        "company_name": check["company_name"],
-        "servicenow_customer": check["servicenow_customer"],
-        "servicenow_matched_name": check["servicenow_matched_name"],
-        "match_score": check["match_score"],
-        "check_status": check["check_status"],
-        "headquarters": check["headquarters"],
-        "country": check["country"],
-        "country_code": check["country_code"],
-        "apollo_company_name": check["apollo_company_name"],
-        "checked_at": check["checked_at"],
-        "callback_url": app_base_url.rstrip("/") + "/api/webhooks/n8n",
-    }
-
-
-def send_negatives_to_n8n(database: WorkflowDatabase, run_id: int, settings: Settings) -> int:
-    checks = database.unsent_negative_checks(run_id)
-    if not checks:
-        return 0
-    if not settings.n8n_webhook_url:
-        for check in checks:
-            database.set_n8n_result(
-                check["person_id"], status="not_configured", response="N8N_WEBHOOK_URL is not configured"
-            )
-        return 0
-    def deliver(check: dict[str, Any]) -> bool:
-        payload = n8n_payload(check, settings.app_base_url)
-        try:
-            response = requests.post(settings.n8n_webhook_url, json=payload, timeout=30)
-            response.raise_for_status()
-            # Keep valid JSON intact. Truncating a large response can cut through
-            # a string and make status/citation fields impossible to parse.
-            body = response.text
-            database.set_n8n_result(check["person_id"], status="sent", response=body, sent=True)
-            return True
-        except requests.RequestException as exc:
-            database.set_n8n_result(check["person_id"], status="failed", response=str(exc))
-            return False
-
-    # n8n may keep a webhook request open until its workflow finishes. Deliver
-    # independently so one slow workflow cannot block every later company.
-    with ThreadPoolExecutor(max_workers=min(4, len(checks))) as executor:
-        return sum(executor.map(deliver, checks))
-
-
 def _pipeline_process(
     *, input_path: Path, output_path: Path, stage: str, force: bool,
     progress_callback: Any | None = None,
@@ -477,7 +420,6 @@ def run_collection(
             )
         )
         sync_count = sync_pipeline_results(database, run_id, output_path)
-        sent_count = send_negatives_to_n8n(database, run_id, settings)
         log = process.strip()[-20_000:]
         report_rows = database.report_rows(run_id)
         completed_checks = sum(row["check_status"] == "completed" for row in report_rows)
@@ -496,8 +438,7 @@ def run_collection(
         )
         summary = (
             f"Resolved {resolved_count}/{people_count}; ServiceNow completed "
-            f"{completed_checks}/{people_count}; synced {sync_count}; sent {sent_count} "
-            f"negative result(s) to n8n.\n{log}"
+            f"{completed_checks}/{people_count}; synced {sync_count}.\n{log}"
         )
         database.update_run(run_id, status=status, finished_at=now(), collection_log=summary)
         if login_monitor:

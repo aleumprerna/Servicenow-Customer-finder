@@ -9,7 +9,6 @@ import microsoft_auth
 from microsoft_auth import (
     EmailStore,
     MicrosoftAuthSettings,
-    N8N_BULK_RECEIPT_URL,
     _login_page,
     _parse_recipients,
     _token_cache_summary,
@@ -42,26 +41,23 @@ def test_signed_in_page_escapes_claims() -> None:
     assert "person@example.com" in page
 
 
-def test_signed_in_page_links_to_n8n_with_encoded_account_email_in_new_tab() -> None:
+def test_signed_in_page_has_remove_action_without_n8n() -> None:
     page = _login_page(
         user={"name": "Sales Bot", "preferred_username": "salesbot@aelumconsulting.com"},
         accounts=[{"id": 1, "display_name": "Sales Bot", "email": "salesbot@aelumconsulting.com"}],
     )
 
-    assert "Connect to n8n" in page
-    assert f'href="{N8N_BULK_RECEIPT_URL}?parms=salesbot%40aelumconsulting.com"' in page
-    assert 'target="_blank"' in page
-    assert 'rel="noopener noreferrer"' in page
+    assert "n8n" not in page.lower()
     assert 'href="/auth/microsoft"' not in page
     assert 'action="/accounts/1/remove"' in page
     assert ">Remove</button>" in page
     assert "Sign out of this browser session" not in page
 
 
-def test_signed_out_page_does_not_show_n8n_action() -> None:
+def test_signed_out_page_does_not_show_n8n() -> None:
     page = _login_page(configured=True)
 
-    assert "Connect to n8n" not in page
+    assert "n8n" not in page.lower()
 
 
 def test_authority_uses_configured_tenant() -> None:

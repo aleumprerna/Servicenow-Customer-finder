@@ -9,7 +9,6 @@ CSV upload
   -> company resolution
   -> Apollo company enrichment
   -> authenticated ServiceNow portal check
-  -> optional n8n workflow
   -> Deep Research
   -> deterministic evidence classification
   -> report, evidence links, screenshots, and CSV export
@@ -71,19 +70,11 @@ When a positive match is found, the application can save a screenshot as visual 
 
 The portal result is separate from Deep Research. In particular, a match against the generic ServiceNow customer directory is not accepted as a company-specific Deep Research citation.
 
-## Step 5: n8n market-data workflow
-
-**Source:** the configured n8n webhook and whatever external sources that n8n workflow uses.
-
-Only completed ServiceNow checks with `servicenow_customer=No` are sent automatically. `Yes`, `Unknown`, and technical failures are not sent. The application stores the n8n response, status, research-source labels, citations, and evidence URLs returned by that workflow.
-
-Because n8n is separately configured, its own nodes determine its external sources. The application validates returned citation URLs before displaying them but cannot independently guarantee an n8n source unless the response includes supporting evidence.
-
-## Step 6: Deep Research
+## Step 5: Deep Research
 
 Deep Research combines a bounded crawl of the official company site, OpenAI hosted web search, and direct verification of possible ServiceNow customer-story pages. The default configuration uses `OPENAI_API_KEY`; no Serper API is used.
 
-### 6.1 Official company website crawl
+### 5.1 Official company website crawl
 
 **Source:** the resolved company's public official domain and its subdomains.
 

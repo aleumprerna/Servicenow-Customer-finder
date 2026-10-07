@@ -95,7 +95,7 @@ def test_stage_tables_show_distinct_workflow_data() -> None:
     assert "Automation status" in automation
     assert "ServiceNow customer" in automation
     assert "Final status" in final
-    assert "n8n delivery" in final
+    assert "Research status" in final
 
 
 def test_people_tables_use_serial_numbers_instead_of_initials() -> None:
@@ -155,7 +155,7 @@ def test_results_offer_yes_no_filters_and_selected_bulk_research(monkeypatch) ->
     assert "if (data.cached) { window.clearInterval(messageTimer); window.location.reload()" not in html
 
 
-def test_final_table_expands_the_whole_record_and_uses_n8n_citations() -> None:
+def test_final_table_expands_the_whole_record_and_uses_research_citations() -> None:
     row = _row("apollo_structurally_verified")
     row.update(
         {
@@ -182,7 +182,7 @@ def test_final_table_expands_the_whole_record_and_uses_n8n_citations() -> None:
 
     assert '<details class="final-record">' in html
     assert "Show record" in html
-    assert "n8n research citations" in html
+    assert "Research citations" in html
     assert "https://www.servicenow.com/partners/example.html" in html
 
 

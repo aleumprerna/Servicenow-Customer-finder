@@ -72,7 +72,6 @@ from workflow.service import (
 
     run_enrichment,
 
-    send_negatives_to_n8n,
 
 )
 
@@ -662,7 +661,7 @@ def _report_card(row: dict[str, Any]) -> str:
 
     if evidence.parse_error:
 
-        note_parts.append('<p class="detail-alert">The stored n8n response could not be fully read.</p>')
+        note_parts.append('<p class="detail-alert">The stored research response could not be fully read.</p>')
 
     notes = "".join(note_parts) or '<p class="muted">No additional verification notes.</p>'
 
@@ -754,7 +753,7 @@ def _report_card(row: dict[str, Any]) -> str:
 
                 <div><dt>Collection status</dt><dd>{_pretty_status(row.get("check_status"), "Waiting")}</dd></div>
 
-                <div><dt>n8n delivery</dt><dd>{_pretty_status(evidence.delivery_status, "Waiting")}</dd></div>
+                <div><dt>Research status</dt><dd>{_pretty_status(evidence.delivery_status, "Waiting")}</dd></div>
 
                 <div><dt>Checked</dt><dd>{_escape(row.get("checked_at")) or "Not yet"}</dd></div>
 
@@ -964,13 +963,13 @@ def _final_results_table(rows: list[dict[str, Any]]) -> str:
                     citation_items.append(f'<li>{_escape(label)} <span class="muted">(URL unavailable)</span></li>')
             evidence_html = f"""
               <div class="final-evidence-card">
-                <div class="evidence-title"><span>n8n research citations</span><small>Market intelligence sources</small></div>
+                <div class="evidence-title"><span>Research citations</span><small>Market intelligence sources</small></div>
                 <ul class="citation-list">{''.join(citation_items)}</ul>
               </div>"""
         else:
             evidence_html = """
               <div class="final-evidence-card evidence-empty">
-                <div class="evidence-title"><span>Verification in progress</span><small>The record has not returned a screenshot or an n8n citation yet.</small></div>
+                <div class="evidence-title"><span>Verification in progress</span><small>The record has not returned a screenshot or research citation yet.</small></div>
               </div>"""
 
         verification_note = (
@@ -1022,7 +1021,7 @@ def _final_results_table(rows: list[dict[str, Any]]) -> str:
         records.append('<div class="table-empty">Final results will appear after processing.</div>')
     return f"""
       <div class="final-records">
-        <div class="final-record-header" aria-hidden="true"><span>Person &amp; company</span><span>Final status</span><span>ServiceNow app</span><span>Sources</span><span>n8n delivery</span><span></span></div>
+        <div class="final-record-header" aria-hidden="true"><span>Person &amp; company</span><span>Final status</span><span>ServiceNow app</span><span>Sources</span><span>Research status</span><span></span></div>
         {''.join(records)}
       </div>"""
 
@@ -1326,11 +1325,10 @@ def _legacy_page(request: Request, selected_run: int | None = None) -> str:
               <div class="step-body">
                 <span class="phase-tag">Phase 3</span>
                 <h3>Review final results</h3>
-                <p>Review verified customer evidence, sync market intelligence, or export qualified leads.</p>
+                <p>Review verified customer evidence or export qualified leads.</p>
                 <div class="step-metric"><strong>{confirmed_count}</strong><span>verified high-intent accounts</span></div>
               </div>
               <div class="step-actions">
-                <form method="post" action="/runs/{selected_run}/send-n8n"><button {final_disabled}>Sync Market Data</button></form>
                 {download_action}
               </div>
             </article>
@@ -4191,7 +4189,6 @@ def _page(request: Request, selected_run: int | None = None) -> str:
           <p><strong>Verification service</strong><br><span id="advanced-login-copy">{_escape(login_snapshot.detail or login_snapshot.status)}</span></p>
           <div class="advanced-actions">
             {f'<form method="post" action="/runs/{selected_run}/collect"><button>Retry verification</button></form>' if run and enriched_count and not busy else ''}
-            {f'<form method="post" action="/runs/{selected_run}/send-n8n"><button>Refresh opportunity data</button></form>' if run and automation_complete else ''}
             <form method="post" action="/database/clear" onsubmit="return confirm('Delete every local customer list and result? This cannot be undone.');"><button class="danger">Clear saved data</button></form>
           </div>
           {f'<details class="run-log"><summary>View activity details</summary><pre>{run_log}</pre></details>' if run_log else ''}
@@ -4965,47 +4962,6 @@ def collect(run_id: int, background_tasks: BackgroundTasks) -> RedirectResponse:
 
 
 
-@app.post("/runs/{run_id}/send-n8n")
-
-def send_to_n8n(run_id: int) -> RedirectResponse:
-
-    if not DATABASE.run(run_id):
-
-        raise HTTPException(status_code=404, detail="Run not found")
-
-    for row in DATABASE.report_rows(run_id):
-
-        evidence = parse_n8n_evidence(
-
-            str(row.get("n8n_status") or ""), str(row.get("n8n_response") or "")
-
-        )
-
-        if (
-
-            str(row.get("servicenow_customer") or "").lower() == "no"
-
-            and row.get("n8n_status") in {"sent", "received"}
-
-            and evidence.parse_error
-
-        ):
-
-            DATABASE.mark_n8n_for_retry(int(row["person_id"]))
-
-    settings = load_settings()
-
-    sent = send_negatives_to_n8n(DATABASE, run_id, settings)
-
-    message = f"Sent+{sent}+No+result(s)+to+n8n"
-
-    kind = "success" if sent else "error"
-
-    return RedirectResponse(url=f"/?run_id={run_id}&kind={kind}&message={message}", status_code=303)
-
-
-
-
 
 @app.get("/api/reports")
 
@@ -5160,30 +5116,3 @@ def reports_csv(run_id: int | None = None) -> StreamingResponse:
 
 
 
-@app.post("/api/webhooks/n8n")
-
-async def n8n_callback(request: Request) -> dict[str, str]:
-
-    token = os.getenv("N8N_CALLBACK_TOKEN", "").strip()
-
-    if token and request.headers.get("X-Workflow-Token") != token:
-
-        raise HTTPException(status_code=401, detail="Invalid workflow token")
-
-    try:
-
-        payload = await request.json()
-
-        person_id = int(payload["person_id"])
-
-    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
-
-        raise HTTPException(status_code=400, detail="JSON body must include integer person_id") from None
-
-    DATABASE.set_n8n_result(
-
-        person_id, status="received", response=json.dumps(payload, ensure_ascii=False), received=True
-
-    )
-
-    return {"status": "stored"}

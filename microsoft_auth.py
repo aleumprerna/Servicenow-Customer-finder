@@ -16,7 +16,6 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 SCOPES = ["User.Read", "Mail.Send"]
 GRAPH_SEND_URL = "https://graph.microsoft.com/v1.0/me/sendMail"
-N8N_BULK_RECEIPT_URL = "http://localhost:5678/webhook/show-params-webhook/"
 # Route login audit messages through Uvicorn's configured application logger so
 # INFO records are visible in the same terminal where the web app is running.
 LOGGER = logging.getLogger("uvicorn.error")
@@ -114,6 +113,7 @@ def _token_cache_summary(cache: str) -> dict[str, object]:
 class EmailStore:
     def __init__(self) -> None:
         self.path = Path(__file__).resolve().parent / "data" / "workflow.db"
+        self._default_path = self.path
 
     def connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -123,7 +123,9 @@ class EmailStore:
 
     @property
     def uses_postgres_tokens(self) -> bool:
-        return bool(os.getenv("MSAL_DB_HOST", "").strip())
+        # A custom path is used by isolated/local stores (including tests); those
+        # must not unexpectedly connect to the configured production token DB.
+        return self.path == self._default_path and bool(os.getenv("MSAL_DB_HOST", "").strip())
 
     def connect_tokens(self) -> psycopg.Connection:
         """Connect only to the remote MSAL token table through the SSH tunnel."""
@@ -440,10 +442,7 @@ def _login_page(*, user: dict[str, str] | None = None, error: str = "", configur
             f'<span class="muted">{html.escape(account_email)}</span>'
             f'<div class="muted account-api-response" data-email="{html.escape(account_email, quote=True)}">'
             f'Loading saved API data...</div></div>'
-            f'<div class="account-actions"><a class="button secondary" '
-            f'href="{N8N_BULK_RECEIPT_URL}?parms={quote(account_email, safe="")}" '
-            f'target="_blank" rel="noopener noreferrer">Connect to n8n</a>'
-            f'<form method="post" action="/accounts/{account["id"]}/remove" '
+            f'<div class="account-actions"><form method="post" action="/accounts/{account["id"]}/remove" '
             f'onsubmit="return confirm(\'Remove and sign out this Microsoft account?\')">'
             f'<button class="danger">Remove</button></form></div></div>'
         )
