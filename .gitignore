@@ -9,3 +9,6 @@ __pycache__/
 debug/
 companies_checked.csv
 data/
+build/
+dist/
+*.egg-info/

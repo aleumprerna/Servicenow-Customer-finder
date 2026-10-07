@@ -21,6 +21,11 @@ Your Apollo API key needs access to both **People Match** (to resolve the employ
 
 ### Microsoft sign-in sample
 
+Microsoft authentication is available as the reusable `microsoft_identity` package.
+See [the library guide](microsoft_identity/README.md) for installation, direct Python
+imports, configurable storage, and attaching the existing pages to another FastAPI app.
+The current project's `microsoft_auth.py` is a compatibility adapter.
+
 1. In the Microsoft Entra admin center, open **App registrations**, create a registration, and record its Application (client) ID and Directory (tenant) ID.
 2. Under **Authentication**, add the **Web** redirect URI `http://localhost:8000/auth/callback`.
 3. Under **Certificates & secrets**, create a client secret for local development. Copy its **Value** immediately.
