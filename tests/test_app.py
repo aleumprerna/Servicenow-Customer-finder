@@ -4,12 +4,12 @@ from io import BytesIO
 from pathlib import Path
 
 from fastapi import BackgroundTasks
+from fastapi.testclient import TestClient
 from starlette.datastructures import UploadFile
 from starlette.requests import Request
 
 import app as dashboard
-from app import _automation_table, _enrichment_table, _final_results_table, _page, _report_card
-from browser.session_monitor import LoginSnapshot
+from app import _enrichment_table, _final_results_table, _page, _report_card
 
 
 def _row(resolution_status: str, resolution_error: str = "") -> dict[str, object]:
@@ -86,14 +86,11 @@ def test_stage_tables_show_distinct_workflow_data() -> None:
     )
 
     enriched = _enrichment_table([row])
-    automation = _automation_table([row])
     final = _final_results_table([row])
 
     assert "<th>Resolution</th>" not in enriched
     assert "Needs approval" in enriched
     assert "Company requires review." in enriched
-    assert "Automation status" in automation
-    assert "ServiceNow customer" in automation
     assert "Final status" in final
     assert "Research status" in final
 
@@ -105,7 +102,6 @@ def test_people_tables_use_serial_numbers_instead_of_initials() -> None:
 
     tables = (
         _enrichment_table([first, second]),
-        _automation_table([first, second]),
         _final_results_table([first, second]),
         dashboard._review_companies_table([first, second]),
         dashboard._simplified_results_table([first, second]),
@@ -209,7 +205,7 @@ def test_final_table_prefers_a_screenshot_over_n8n_citations(
     assert "n8n research citations" not in html
 
 
-def test_page_renders_progress_steps_and_three_record_tabs(monkeypatch) -> None:
+def test_enriched_page_shows_results_without_browser_stage(monkeypatch) -> None:
     row = _row("apollo_structurally_verified")
     row.update({"check_status": "apollo_success", "apollo_company_name": "Example Company"})
 
@@ -236,52 +232,15 @@ def test_page_renders_progress_steps_and_three_record_tabs(monkeypatch) -> None:
     assert 'class="usage-info-btn"' in html
     assert "AI usage for this dataset" in html
 
-    assert html.count('class="workflow-step ') == 3
-    assert 'id="tab-enriched"' in html
-    assert 'id="tab-automation"' in html
-    assert 'id="tab-final"' in html
-    assert "Enriched records" in html
-    assert "Web automation" in html
-    assert "Final table" in html
-    assert "Customer verification workspace" in html
-    assert 'id="login-status"' in html
-    assert "Waiting for Login" in html
-    assert "pollLoginStatus" in html
-    assert 'class="overview-stats"' in html
-    assert "Companies approved" in html
-    assert "prefers-reduced-motion" in html
-    assert 'class="async-stage-form"' in html
-    assert 'class="stage-progress"' in html
-    assert '<meta http-equiv="refresh"' not in html
-    assert html.count(">Verify Customers</button>") == 1
-    enriched_button = html.split('id="tab-enriched"', 1)[0].rsplit("<button", 1)[1]
-    assert "tab-button active" in enriched_button
-
-
-def test_page_shows_logged_in_session_state(monkeypatch) -> None:
-    class Database:
-        def summary(self):
-            return []
-
-    class Monitor:
-        snapshot = LoginSnapshot(
-            status="Logged In",
-            logged_in=True,
-            browser_connected=True,
-            detail="Authenticated form detected",
-            tone="logged-in",
-        )
-
-    monkeypatch.setattr(dashboard, "DATABASE", Database())
-    monkeypatch.setattr(dashboard, "LOGIN_MONITOR", Monitor())
-    request = Request(
-        {"type": "http", "method": "GET", "path": "/", "query_string": b"", "headers": []}
-    )
-
-    html = _page(request)
-
-    assert 'id="login-status" class="session-status logged-in"' in html
-    assert ">Logged In</span>" in html
+    assert html.count('class="workflow-step ') == 2
+    assert "Results" in html
+    assert "Deep Research" in html
+    assert "/launch-browser" not in html
+    assert "/collect" not in html
+    assert "pollLoginStatus" not in html
+    assert "/api/session-status" not in html
+    assert "Company enrichment complete" in html
+    assert "Review companies" in html
 
 
 def test_progress_payload_reports_live_stage_counts(monkeypatch) -> None:
@@ -307,7 +266,38 @@ def test_progress_payload_reports_live_stage_counts(monkeypatch) -> None:
     assert progress["enriched"] == 1
     assert progress["target"] == 2
     assert progress["enrichment_percent"] == 50
-    assert progress["automation_percent"] == 0
+    assert "automation_percent" not in progress
+
+
+def test_app_startup_and_results_work_without_browser_routes(tmp_path, monkeypatch):
+    from workflow.database import WorkflowDatabase
+    import microsoft_auth
+
+    database = WorkflowDatabase(tmp_path / "workflow.db")
+    database.initialize()
+    run_id = database.create_run(
+        "companies.csv",
+        [{"person_name": "Example Person", "company_name": "Example Company", "linkedin_url": ""}],
+    )
+    person_id = database.people_for_run(run_id)[0]["id"]
+    database.update_person_resolution(person_id, company_name="Example Company", status="csv_supplied")
+    database.upsert_check(person_id, run_id, {"company_name": "Example Company", "check_status": "apollo_success"})
+    database.update_run(run_id, status="enriched")
+    monkeypatch.setattr(dashboard, "DATABASE", database)
+    monkeypatch.setattr(microsoft_auth.STORE, "path", tmp_path / "auth.db")
+
+    with TestClient(dashboard.app) as client:
+        page = client.get(f"/?run_id={run_id}")
+        assert page.status_code == 200
+        assert "Company enrichment complete" in page.text
+        assert "Deep Research" in page.text
+        assert client.get("/login").status_code == 200
+        assert client.get(f"/reports.csv?run_id={run_id}").status_code == 200
+        assert client.post(f"/runs/{run_id}/launch-browser").status_code == 404
+        assert client.post(f"/runs/{run_id}/collect").status_code == 404
+        assert client.get("/api/session-status").status_code == 404
+        review = client.get(f"/?run_id={run_id}&view=review")
+        assert "Review Companies" in review.text
 
 
 def test_failed_enrichment_finishes_the_stage_and_allows_ready_rows_to_continue(
@@ -334,60 +324,8 @@ def test_failed_enrichment_finishes_the_stage_and_allows_ready_rows_to_continue(
     assert progress["failed_enrichment"] == 1
     assert progress["enrichment_complete"] is True
     assert progress["enrichment_percent"] == 100
-    assert progress["automation_target"] == 1
-    assert progress["can_automate"] is True
-
-
-def test_web_automation_can_start_when_some_enriched_rows_are_ready(monkeypatch) -> None:
-    updates: list[dict[str, str]] = []
-
-    class Database:
-        def run(self, _run_id):
-            return {"id": 7, "status": "needs_enrichment"}
-
-        def report_rows(self, _run_id):
-            return [{"check_status": "apollo_success"}, {"check_status": "apollo_failed"}]
-
-        def update_run(self, _run_id, **values):
-            updates.append(values)
-
-    monkeypatch.setattr(dashboard, "DATABASE", Database())
-    tasks = BackgroundTasks()
-
-    response = dashboard.collect(7, tasks)
-
-    assert response.status_code == 303
-    assert updates == [{"status": "collecting"}]
-    assert len(tasks.tasks) == 1
-    assert tasks.tasks[0].args[2] is dashboard.LOGIN_MONITOR
-
-
-def test_open_browser_queues_automation_that_waits_for_login(monkeypatch) -> None:
-    updates: list[dict[str, str]] = []
-    launches: list[bool] = []
-
-    class Database:
-        def run(self, _run_id):
-            return {"id": 7, "status": "enriched"}
-
-        def report_rows(self, _run_id):
-            return [{"check_status": "apollo_success"}]
-
-        def update_run(self, _run_id, **values):
-            updates.append(values)
-
-    monkeypatch.setattr(dashboard, "DATABASE", Database())
-    monkeypatch.setattr(dashboard, "launch_chrome", lambda: launches.append(True))
-    tasks = BackgroundTasks()
-
-    response = dashboard.open_browser(7, tasks)
-
-    assert response.status_code == 303
-    assert launches == [True]
-    assert updates == [{"status": "collecting"}]
-    assert len(tasks.tasks) == 1
-    assert tasks.tasks[0].func is dashboard.run_collection
-    assert tasks.tasks[0].args == (dashboard.DATABASE, 7, dashboard.LOGIN_MONITOR)
+    assert progress["enriched"] == 1
+    assert progress["can_enrich"] is True
 
 
 def test_enrichment_table_renders_ai_button_for_unverified_records() -> None:

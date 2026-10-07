@@ -8,10 +8,9 @@ This document explains the complete ServiceNow Partner Finder workflow, the sour
 CSV upload
   -> company resolution
   -> Apollo company enrichment
-  -> authenticated ServiceNow portal check
   -> Deep Research
   -> deterministic evidence classification
-  -> report, evidence links, screenshots, and CSV export
+  -> report, evidence links, and CSV export
 ```
 
 The local SQLite database at `data/workflow.db` stores workflow state, results, evidence JSON, and AI usage metrics. It is storage, not an external evidence source.
@@ -54,27 +53,11 @@ The enrichment step obtains:
 
 Direct organization enrichment is used when a domain or company LinkedIn URL is available. Organization Search is the fallback. Candidates are ranked using company-name similarity, LinkedIn URL, and domain. Weak matches and unresolved ties are rejected instead of silently selecting a company.
 
-## Step 4: Authenticated ServiceNow portal verification
-
-**Source:** the ServiceNow Customer Information form opened in the user's authenticated Chrome session.
-
-The application attaches to Chrome through the remote-debugging connection and searches the resolved company name. Results are compared using normalized company-name similarity.
-
-| Result | Meaning |
-|---|---|
-| `Yes` | A strong matching ServiceNow portal result was returned. |
-| `No` | The search completed successfully and no reasonable match was found. |
-| `Unknown` | The result was ambiguous, the page was not recognized, or a technical failure occurred. |
-
-When a positive match is found, the application can save a screenshot as visual evidence. A technical failure is never converted into `No`.
-
-The portal result is separate from Deep Research. In particular, a match against the generic ServiceNow customer directory is not accepted as a company-specific Deep Research citation.
-
-## Step 5: Deep Research
+## Step 4: Deep Research
 
 Deep Research combines a bounded crawl of the official company site, OpenAI hosted web search, and direct verification of possible ServiceNow customer-story pages. The default configuration uses `OPENAI_API_KEY`; no Serper API is used.
 
-### 5.1 Official company website crawl
+### 4.1 Official company website crawl
 
 **Source:** the resolved company's public official domain and its subdomains.
 
@@ -90,7 +73,7 @@ Safety and scope controls include:
 
 Pages fetched directly by the crawler are citation-grounded because the application observed the URL and content itself.
 
-### 6.2 OpenAI hosted web search
+### 4.2 OpenAI hosted web search
 
 **Source mechanism:** OpenAI Responses API `web_search` tool using `OPENAI_API_KEY`.
 
@@ -111,7 +94,7 @@ DNS, certificate-transparency, GitHub, and public fingerprint sources are curren
 
 Excluded as final proof are unsourced directories, social forums, aggregators, Apollo technographics, ZoomInfo, BuiltWith, and 6sense. They may help discovery, but they do not independently establish internal ServiceNow use.
 
-### 6.3 LinkedIn implementation and go-live posts
+### 4.3 LinkedIn implementation and go-live posts
 
 A specific, grounded LinkedIn post can be retained when it explicitly names the target company and describes a ServiceNow implementation, go-live, rollout, migration, collaboration, or module.
 
@@ -125,7 +108,7 @@ Examples:
 
 Third-party implementation evidence normally supports `LIKELY_CUSTOMER`; it does not receive the same authority as an exact official customer story or an explicit statement on the target company's own domain.
 
-### 6.4 ServiceNow customer-story verification
+### 4.4 ServiceNow customer-story verification
 
 **Source:** a specific page under `servicenow.com/.../customers/<company>.html`.
 
@@ -138,7 +121,7 @@ The verifier checks search-discovered URLs and a small set of deterministic comp
 
 The generic URL `https://www.servicenow.com/customers.html` is a discovery page only. It is never retained as company evidence, never counted as a relevant source, and can never produce 100% confidence. Directory name-match scores are also not Deep Research evidence.
 
-## Step 7: Evidence URL validation
+## Step 5: Evidence URL validation
 
 Every model-produced finding must match a URL contained in the search provider's grounding metadata. The application fails closed: if grounding URLs are absent, model-written URLs are discarded.
 
@@ -162,7 +145,7 @@ Each retained evidence item stores:
 - customer, partner, or ambiguous category;
 - official-source and citation-grounded flags.
 
-## Step 8: Module detection
+## Step 6: Module detection
 
 Modules are collected only when the cited evidence explicitly names them. The deterministic extractor recognizes:
 
@@ -184,7 +167,7 @@ Modules are collected only when the cited evidence explicitly names them. The de
 
 The evidence card displays the modules next to the supporting excerpt and reason. A generic reference to “ServiceNow” produces an empty module list rather than a guessed module.
 
-## Step 9: Evidence categories
+## Step 7: Evidence categories
 
 ### Customer evidence
 
@@ -204,7 +187,7 @@ Evidence about consulting, reselling, implementation services, certifications, o
 
 Generic ServiceNow mentions that do not establish internal use, customer status, or a specific implementation relationship.
 
-## Step 10: Classification and confidence
+## Step 8: Classification and confidence
 
 Final classification is rule-controlled. The model may suggest wording and confidence only within the classification boundary established by retained evidence.
 
@@ -221,7 +204,7 @@ Final classification is rule-controlled. The model may suggest wording and confi
 
 The generic ServiceNow customer directory is filtered out even from older cached evidence. Search volume does not raise confidence: confidence is based on retained relevant evidence, not the number of pages checked.
 
-## Step 11: Results and audit trail
+## Step 9: Results and audit trail
 
 The UI shows separate sections for customer evidence, partner evidence, and ambiguous references. Each card can show its source link, source type, strength, evidence, named modules, and reason. The research dialog also shows:
 

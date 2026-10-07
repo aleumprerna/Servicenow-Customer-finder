@@ -6,13 +6,9 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any, Callable
 
-from playwright.async_api import Error as PlaywrightError, Playwright, async_playwright
 from pydantic import ValidationError
 
-from browser.connection import ConnectedServiceNow, FormNotFoundError, connect_to_servicenow
-from browser.servicenow import SearchTechnicalError, ServiceNowChecker, SessionExpiredError, safe_filename
 from clients.apollo import ApolloClient, ApolloError
 from config import Settings, load_settings
 from models.company import CheckStatus, CompanyRecord
@@ -28,24 +24,14 @@ LOGGER = logging.getLogger(__name__)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Check CSV companies against the open ServiceNow Customer Information form."
+        description="Enrich CSV companies with headquarters and country data."
     )
-    parser.add_argument("--force", action="store_true", help="Recheck rows already marked completed")
+    parser.add_argument("--force", action="store_true", help="Refresh rows already processed")
     parser.add_argument("--company", help="Process only this exact company name (case-insensitive)")
     parser.add_argument("--limit", type=int, help="Process only the first N selected rows")
     parser.add_argument("--env-file", type=Path, help="Use an alternative .env file")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
-    stages = parser.add_mutually_exclusive_group()
-    stages.add_argument(
-        "--enrich-only",
-        action="store_true",
-        help="Run Apollo enrichment and checkpoint the CSV without opening a browser",
-    )
-    stages.add_argument(
-        "--automation-only",
-        action="store_true",
-        help="Run ServiceNow browser automation using previously enriched CSV rows",
-    )
+    parser.add_argument("--enrich-only", action="store_true", help="Run company enrichment (the default)")
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be at least 1")
@@ -105,7 +91,7 @@ async def enrich_indices(
     indices: list[int],
     settings: Settings,
 ) -> None:
-    """Checkpoint Apollo organization data without touching the browser."""
+    """Checkpoint Apollo organization data to CSV."""
 
     apollo = build_apollo_client(settings)
     metrics_database: WorkflowDatabase | None = None
@@ -219,197 +205,6 @@ async def enrich_indices(
             await asyncio.sleep(settings.delay_between_companies_seconds)
 
 
-async def automate_indices(
-    csv_service: CSVService,
-    indices: list[int],
-    settings: Settings,
-    *,
-    playwright: Playwright | None = None,
-    connected: ConnectedServiceNow | None = None,
-    progress_callback: Callable[[], None] | None = None,
-) -> int:
-    """Run ServiceNow checks using only previously checkpointed enrichment."""
-
-    ready: list[int] = []
-    for index in indices:
-        try:
-            record = csv_service.record(index)
-            normalize_country(record.country_code)
-        except (ValidationError, ValueError, CountryNormalizationError):
-            LOGGER.warning("Skipping row %d because it has not been enriched", index + 2)
-            continue
-        ready.append(index)
-    if not ready:
-        LOGGER.error("No enriched rows are ready. Run the enrichment stage first.")
-        return 2
-
-    def make_checker(connection: object) -> ServiceNowChecker:
-        return ServiceNowChecker(
-            page=connection.page,  # type: ignore[attr-defined]
-            frame=connection.frame,  # type: ignore[attr-defined]
-            timeout_seconds=settings.search_timeout_seconds,
-            match_threshold=settings.match_threshold,
-            review_threshold=settings.review_threshold,
-            save_screenshots=settings.save_screenshots,
-            debug_dir=settings.debug_dir,
-            result_selectors=settings.result_selectors,
-        )
-
-    if connected is not None or playwright is not None:
-        if connected is None or playwright is None:
-            raise ValueError("connected and playwright must be supplied together")
-        LOGGER.info("Continuing with the existing attached Chrome session.")
-        return await _automate_ready_rows(
-            csv_service,
-            ready,
-            settings,
-            playwright=playwright,
-            connected=connected,
-            make_checker=make_checker,
-            progress_callback=progress_callback,
-        )
-
-    async with async_playwright() as local_playwright:
-        try:
-            local_connected = await connect_to_servicenow(local_playwright, settings.chrome_cdp_url)
-        except (ConnectionError, FormNotFoundError) as exc:
-            LOGGER.error("%s", clean_error(exc))
-            return 3
-        LOGGER.info("Connected to existing Chrome and found the ServiceNow customer form.")
-        return await _automate_ready_rows(
-            csv_service,
-            ready,
-            settings,
-            playwright=local_playwright,
-            connected=local_connected,
-            make_checker=make_checker,
-            progress_callback=progress_callback,
-        )
-
-
-async def _automate_ready_rows(
-    csv_service: CSVService,
-    ready: list[int],
-    settings: Settings,
-    *,
-    playwright: Playwright,
-    connected: ConnectedServiceNow,
-    make_checker: Callable[[Any], ServiceNowChecker],
-    progress_callback: Callable[[], None] | None,
-) -> int:
-    checker = make_checker(connected)
-
-    for position, index in enumerate(ready, start=1):
-        record = csv_service.record(index)
-        country_code = normalize_country(record.country_code)
-        LOGGER.info("[%d/%d] %s", position, len(ready), record.company_name)
-        csv_service.update(index, check_status=CheckStatus.SEARCHING)
-        csv_service.save()
-        if progress_callback:
-            progress_callback()
-        LOGGER.info("Selecting country: %s - %s", country_code, country_name(country_code))
-        LOGGER.info("Searching customer: %s", record.company_name)
-
-        try:
-            for session_attempt in range(2):
-                try:
-                    await checker.assert_session_active()
-                    result = await checker.search_with_retry(record.company_name, country_code)
-                    break
-                except SessionExpiredError as exc:
-                    if session_attempt > 0:
-                        raise
-                    LOGGER.warning(
-                        "%s; looking for a replacement ServiceNow page and retrying once",
-                        clean_error(exc),
-                    )
-                    reconnect_error: Exception = exc
-                    for _ in range(5):
-                        await asyncio.sleep(1)
-                        try:
-                            connected = await connect_to_servicenow(
-                                playwright, settings.chrome_cdp_url
-                            )
-                            checker = make_checker(connected)
-                            LOGGER.info(
-                                "Reconnected to the ServiceNow form after the page changed"
-                            )
-                            break
-                        except (ConnectionError, FormNotFoundError) as candidate_error:
-                            reconnect_error = candidate_error
-                    else:
-                        raise SessionExpiredError(
-                            "The ServiceNow page closed and no replacement form appeared: "
-                            f"{clean_error(reconnect_error)}"
-                        ) from reconnect_error
-            screenshot_path = ""
-            if result.customer.casefold() == "yes" and settings.save_screenshots:
-                screenshot_path = str(
-                    settings.debug_dir
-                    / "screenshots"
-                    / f"{safe_filename(record.company_name)}_results.png"
-                )
-            csv_service.update(
-                index,
-                servicenow_customer=result.customer,
-                servicenow_matched_name=result.matched_name,
-                servicenow_screenshot=screenshot_path,
-                match_score=result.match_score if result.matched_name else "",
-                check_status=result.status,
-                error_message=result.error_message,
-                checked_at=record.checked_now(),
-            )
-            if result.returned_names:
-                for number, name in enumerate(result.returned_names, start=1):
-                    LOGGER.info("ServiceNow result %d: %s", number, name)
-            if result.matched_name:
-                LOGGER.info("Best match: %s (score %d)", result.matched_name, result.match_score)
-            LOGGER.info("ServiceNow Customer: %s", result.customer.upper())
-        except SessionExpiredError as exc:
-            csv_service.update(
-                index,
-                servicenow_customer="Unknown",
-                check_status=CheckStatus.ERROR,
-                error_message=clean_error(exc),
-                checked_at=record.checked_now(),
-            )
-            csv_service.save()
-            if progress_callback:
-                progress_callback()
-            LOGGER.error("%s", clean_error(exc))
-            return 4
-        except (SearchTechnicalError, PlaywrightError) as exc:
-            csv_service.update(
-                index,
-                servicenow_customer="Unknown",
-                check_status=CheckStatus.ERROR,
-                error_message=clean_error(exc),
-                checked_at=record.checked_now(),
-            )
-            LOGGER.error("ServiceNow automation failed: %s", clean_error(exc))
-        except Exception:
-            csv_service.update(
-                index,
-                servicenow_customer="Unknown",
-                check_status=CheckStatus.ERROR,
-                error_message="Unexpected ServiceNow automation failure",
-                checked_at=record.checked_now(),
-            )
-            LOGGER.exception("Unexpected company-processing failure")
-        finally:
-            csv_service.save()
-            if progress_callback:
-                progress_callback()
-            LOGGER.info("CSV updated: %s", settings.output_csv)
-            LOGGER.info("%s", "-" * 50)
-
-        if position < len(ready):
-            await asyncio.sleep(settings.delay_between_companies_seconds)
-
-    LOGGER.info("Finished %d company row(s). Existing Chrome was left open.", len(ready))
-    return 0
-
-
 async def run(args: argparse.Namespace, settings: Settings) -> int:
     csv_service = CSVService(settings.input_csv, settings.output_csv)
     indices = csv_service.selected_indices(
@@ -423,12 +218,9 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
         return 0
 
     LOGGER.info("Preparing to process %d company row(s)", len(indices))
-    if not args.automation_only:
-        await enrich_indices(csv_service, indices, settings)
-        if args.enrich_only:
-            LOGGER.info("Enrichment stage finished without opening a browser.")
-            return 0
-    return await automate_indices(csv_service, indices, settings)
+    await enrich_indices(csv_service, indices, settings)
+    LOGGER.info("Company enrichment finished.")
+    return 0
 
 
 def main() -> int:

@@ -34,7 +34,6 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from utils.filenames import safe_filename
 
-from browser.session_monitor import LoginSessionMonitor
 
 from config import PROJECT_ROOT, load_settings
 
@@ -64,11 +63,9 @@ from workflow.service import (
 
     TRUSTED_COMPANY_STATUSES,
 
-    launch_chrome,
 
     parse_people_csv,
 
-    run_collection,
 
     run_enrichment,
 
@@ -83,7 +80,6 @@ DATABASE = WorkflowDatabase(PROJECT_ROOT / "data" / "workflow.db")
 
 LOGGER = logging.getLogger(__name__)
 
-LOGIN_MONITOR = LoginSessionMonitor()
 
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -155,12 +151,6 @@ ENRICHED_CHECK_STATUSES = {"apollo_success", "ai_success", "searching", "complet
 
 ENRICHMENT_TERMINAL_STATUSES = ENRICHED_CHECK_STATUSES | {"apollo_failed"}
 
-AUTOMATION_FINISHED_STATUSES = {"completed", "manual_review", "error"}
-
-
-
-
-
 class _SafeHtml(str):
 
     """HTML generated only by trusted dashboard rendering helpers."""
@@ -174,26 +164,6 @@ class _SafeHtml(str):
 def initialize_database() -> None:
 
     DATABASE.initialize()
-
-
-
-
-
-@app.on_event("startup")
-
-async def start_login_monitor() -> None:
-
-    await LOGIN_MONITOR.start(load_settings().chrome_cdp_url)
-
-
-
-
-
-@app.on_event("shutdown")
-
-async def stop_login_monitor() -> None:
-
-    await LOGIN_MONITOR.stop()
 
 
 
@@ -410,22 +380,11 @@ def _pretty_status(value: Any, fallback: str = "Not available") -> str:
     return text.replace("_", " ").replace("-", " ").title() if text else fallback
 
 
-
-
-
-def _workflow_counts(rows: list[dict[str, Any]]) -> tuple[int, int, int]:
+def _workflow_counts(rows: list[dict[str, Any]]) -> tuple[int, int]:
 
     enriched = sum(
 
         str(row.get("check_status") or "").casefold() in ENRICHED_CHECK_STATUSES
-
-        for row in rows
-
-    )
-
-    automated = sum(
-
-        str(row.get("check_status") or "").casefold() in AUTOMATION_FINISHED_STATUSES
 
         for row in rows
 
@@ -437,7 +396,7 @@ def _workflow_counts(rows: list[dict[str, Any]]) -> tuple[int, int, int]:
 
     )
 
-    return enriched, automated, approved
+    return enriched, approved
 
 
 
@@ -866,62 +825,6 @@ def _enrichment_table(rows: list[dict[str, Any]]) -> str:
       </table></div>"""
 
 
-def _automation_table(rows: list[dict[str, Any]]) -> str:
-    body: list[str] = []
-    status_labels = {
-        "apollo_success": ("Ready to run", "info"),
-        "ai_success": ("Ready to run", "info"),
-        "completed": ("Completed", "success"),
-        "manual_review": ("Manual review", "warning"),
-        "error": ("Error", "danger"),
-    }
-    for serial_number, row in enumerate(rows, start=1):
-        raw_status = str(row.get("check_status") or "")
-        label, tone = status_labels.get(raw_status, ("Waiting for enrichment", "neutral"))
-        customer = str(row.get("servicenow_customer") or "")
-        customer_tone = "success" if customer.casefold() == "yes" else "neutral"
-        customer_label = "Customer Verified" if customer.casefold() == "yes" else _pretty_status(customer, "Not checked")
-        customer_html = _status_pill(customer_label, customer_tone)
-        score = _escape(row.get("match_score"))
-        match = _escape(row.get("servicenow_matched_name")) or "No match recorded"
-        if score:
-            match += f' <span class="confidence-badge">{score}% match</span>'
-        evidence_link = '<span class="cell-secondary">—</span>'
-        if _screenshot_path(row):
-            evidence_link = f'<a class="evidence-link-btn" href="/screenshots/{int(row["person_id"])}" target="_blank"><span>🔍</span> View screenshot</a>'
-        error = _escape(row.get("error_message"))
-        error_html = f'<span class="cell-error">{error}</span>' if error else ""
-        person_name = _escape(row.get("person_name")) or "Unnamed prospect"
-        company = _escape(row.get("company_name")) or "Company unresolved"
-        checked_time = _escape(row.get("checked_at")) or "Pending"
-        body.append(
-            f"""
-            <tr class="table-row">
-              <td>
-                <div class="prospect-profile">
-                  <div class="prospect-avatar" aria-label="Serial number {serial_number}">{serial_number}</div>
-                  <div class="prospect-info">
-                    {_table_person_link(row)}
-                    <span class="cell-secondary">{company}</span>
-                  </div>
-                </div>
-              </td>
-              <td>{_status_pill(label, tone)}{error_html}</td>
-              <td>{customer_html}</td>
-              <td>{match}</td>
-              <td><span class="time-tag">{checked_time}</span></td>
-              <td>{evidence_link}</td>
-            </tr>"""
-        )
-    if not body:
-        body.append('<tr><td class="table-empty" colspan="6">No records are ready for web automation.</td></tr>')
-    return f"""
-      <div class="table-scroll"><table class="data-table">
-        <thead><tr><th>Person &amp; company</th><th>Automation status</th><th>ServiceNow customer</th><th>Matched result</th><th>Checked</th><th>Evidence</th></tr></thead>
-        <tbody>{''.join(body)}</tbody>
-      </table></div>"""
-
-
 def _final_results_table(rows: list[dict[str, Any]]) -> str:
     records: list[str] = []
     for serial_number, row in enumerate(rows, start=1):
@@ -1038,7 +941,7 @@ def _run_progress(run_id: int) -> dict[str, Any]:
 
     total = len(rows)
 
-    enriched, automated, approved = _workflow_counts(rows)
+    enriched, approved = _workflow_counts(rows)
 
     target = approved or total
 
@@ -1050,29 +953,11 @@ def _run_progress(run_id: int) -> dict[str, Any]:
 
     )
 
-    automation_target = enriched
-
     enrichment_complete = approved > 0 and processed >= approved
 
-    automation_complete = automation_target > 0 and automated >= automation_target
-
-    busy = run["status"] in {"enriching", "collecting"}
+    busy = run["status"] in {"enriching"}
 
     enrich_state = "active" if run["status"] == "enriching" or not enrichment_complete else "complete"
-
-    automation_state = (
-
-        "locked"
-
-        if run["status"] == "enriching"
-
-        else "active"
-
-        if run["status"] == "collecting" or (enriched > 0 and not automation_complete)
-
-        else "complete" if automation_complete else "locked"
-
-    )
 
     confirmed = sum(
 
@@ -1128,1888 +1013,19 @@ def _run_progress(run_id: int) -> dict[str, Any]:
 
         "enriched": enriched,
 
-        "automated": automated,
-
-        "automation_target": automation_target,
-
         "confirmed": confirmed,
 
         "enrichment_percent": percent(processed, target),
 
-        "automation_percent": percent(automated, automation_target),
-
         "enrichment_complete": enrichment_complete,
-
-        "automation_complete": automation_complete,
 
         "enrich_state": enrich_state,
 
-        "automation_state": automation_state,
-
         "can_enrich": not busy,
-
-        "can_automate": not busy and enriched > 0,
 
         "enrich_label": "Enriching records…" if run["status"] == "enriching" else "Enrich records",
 
-        "automation_label": "Automation running…" if run["status"] == "collecting" else "Start web automation",
-
     }
-
-
-
-
-
-def _legacy_page(request: Request, selected_run: int | None = None) -> str:
-    login_snapshot = LOGIN_MONITOR.snapshot
-    login_tone = login_snapshot.tone or ("logged-in" if login_snapshot.logged_in else "waiting")
-    summaries = DATABASE.summary()
-    if selected_run is None and summaries:
-        selected_run = int(summaries[0]["id"])
-    rows = DATABASE.report_rows(selected_run) if selected_run else []
-    run = DATABASE.run(selected_run) if selected_run else None
-    metrics_loader = getattr(DATABASE, "ai_metrics_summary", None)
-    ai_summary = metrics_loader(selected_run) if selected_run and callable(metrics_loader) else {}
-    options = "".join(
-        f'<option value="{item["id"]}" {"selected" if item["id"] == selected_run else ""}>'
-        f'Batch #{item["id"]} — {_escape(item["status"])} ({item["people_count"]} prospects)</option>'
-        for item in summaries
-    )
-    relationships = [
-        _relationship(
-            row,
-            parse_n8n_evidence(
-                str(row.get("n8n_status") or ""), str(row.get("n8n_response") or "")
-            ),
-        )
-        for row in rows
-    ]
-    confirmed_count = sum(_relationship_tone(label) == "positive" for label in relationships)
-    integration_count = sum(
-        str(row.get("servicenow_customer") or "").casefold() == "yes" for row in rows
-    )
-    attention_count = sum(
-        str(row.get("check_status") or "").casefold() in {"apollo_failed", "error", "manual_review"}
-        or str(row.get("resolution_status") or "") not in TRUSTED_COMPANY_STATUSES
-        for row in rows
-    )
-    report_stats = f"""
-      <div class="report-stats">
-        <div><strong>{len(rows)}</strong><span>Total reports</span></div>
-        <div><strong>{confirmed_count}</strong><span>Customers / partners</span></div>
-        <div><strong>{integration_count}</strong><span>Integration app matches</span></div>
-        <div><strong>{attention_count}</strong><span>Need attention</span></div>
-      </div>"""
-    enriched_count, automation_count, approved_count = _workflow_counts(rows)
-    enrichment_processed_count = _enrichment_processed_count(rows)
-    failed_enrichment_count = sum(
-        str(row.get("check_status") or "").casefold() == "apollo_failed" for row in rows
-    )
-    completed_count = sum(
-        str(row.get("check_status") or "").casefold() == "completed" for row in rows
-    )
-    overview_stats = f"""
-      <div class="overview-stats" aria-label="Run summary">
-        <div class="overview-stat">
-          <div class="stat-top">
-            <span class="stat-icon records" aria-hidden="true">👥</span>
-            <span class="stat-tag">Active List</span>
-          </div>
-          <div class="stat-val">
-            <strong>{len(rows)}</strong>
-            <span class="stat-name">Total Prospects</span>
-            <span class="stat-subtext">People in run</span>
-          </div>
-        </div>
-        <div class="overview-stat highlight-emerald">
-          <div class="stat-top">
-            <span class="stat-icon approved" aria-hidden="true">✓</span>
-            <span class="stat-trend">+12% Verified</span>
-          </div>
-          <div class="stat-val">
-            <strong class="text-emerald">{confirmed_count}</strong>
-            <span class="stat-name">Verified Customers</span>
-            <span class="stat-subtext">Confirmed ServiceNow footprint</span>
-          </div>
-        </div>
-        <div class="overview-stat">
-          <div class="stat-top">
-            <span class="stat-icon checked" aria-hidden="true">🤝</span>
-            <span class="stat-tag">Ecosystem</span>
-          </div>
-          <div class="stat-val">
-            <strong>{approved_count}</strong>
-            <span class="stat-name">Partner Accounts</span>
-            <span class="stat-subtext">Companies approved</span>
-          </div>
-        </div>
-        <div class="overview-stat">
-          <div class="stat-top">
-            <span class="stat-icon confirmed" aria-hidden="true">🎯</span>
-            <span class="stat-tag">High Intent</span>
-          </div>
-          <div class="stat-val">
-            <strong>{completed_count}</strong>
-            <span class="stat-name">Qualified Opportunities</span>
-            <span class="stat-subtext">Relationships found</span>
-          </div>
-        </div>
-      </div>"""
-
-    workflow_steps = '<div class="empty-state"><strong>No active run</strong><span>Upload a CSV to start the workflow.</span></div>'
-    run_log = ""
-    if run:
-        busy = run["status"] in {"enriching", "collecting"}
-        enrichment_total = approved_count or len(rows)
-        automation_total = enriched_count
-        enrichment_complete = approved_count > 0 and enrichment_processed_count >= approved_count
-        automation_complete = automation_total > 0 and automation_count >= automation_total
-        final_complete = run["status"] == "completed"
-        enrichment_percent = round(100 * enrichment_processed_count / enrichment_total) if enrichment_total else 0
-        automation_percent = round(100 * automation_count / automation_total) if automation_total else 0
-        step_one_state = "active" if run["status"] == "enriching" or not enrichment_complete else "complete"
-        step_two_state = (
-            "locked" if run["status"] == "enriching"
-            else "active" if run["status"] == "collecting" or (enriched_count > 0 and not automation_complete)
-            else "complete" if automation_complete else "locked"
-        )
-        step_three_state = "complete" if final_complete else "active" if automation_complete else "locked"
-        enrich_disabled = "disabled" if busy else ""
-        automation_disabled = "disabled" if busy or not enriched_count else ""
-        final_disabled = "disabled" if busy or not automation_complete else ""
-        enrich_label = "Enriching records…" if run["status"] == "enriching" else "Enrich records"
-        automation_label = "Automation running…" if run["status"] == "collecting" else "Start web automation"
-        download_action = (
-            f'<a class="button primary-link" href="/reports.csv?run_id={selected_run}"><span class="btn-icon">⬇</span> Download CSV</a>'
-            if automation_complete
-            else '<span class="button disabled-link" aria-disabled="true"><span class="btn-icon">⬇</span> Download CSV</span>'
-        )
-        workflow_steps = f"""
-          <div class="workflow-progress" id="workflow-progress" data-run-id="{selected_run}" data-busy="{str(busy).lower()}">
-            <article class="workflow-step {step_one_state}" data-stage-card="enrich">
-              <div class="step-top">
-                <span class="step-number" data-step-number="enrich">{'✓' if enrichment_complete else '1'}</span>
-                <span class="step-state" data-approved-count>{approved_count}/{len(rows)} approved</span>
-              </div>
-              <div class="step-body">
-                <span class="phase-tag">Phase 1</span>
-                <h3>Enrich records</h3>
-                <p>Resolve executive contacts and enrich target organizations with company intelligence.</p>
-                <div class="step-metric"><strong data-enriched-count>{enrichment_processed_count}</strong><span>of <span data-enrichment-total>{enrichment_total}</span> processed<span data-enrichment-failures>{f' · {failed_enrichment_count} needs attention' if failed_enrichment_count else ''}</span></span></div>
-                <div class="stage-progress" role="progressbar" aria-label="Enrichment progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{enrichment_percent}" data-progress="enrich"><span style="width:{enrichment_percent}%"></span></div>
-              </div>
-              <form class="async-stage-form" data-stage="enrich" method="post" action="/runs/{selected_run}/enrich"><button class="primary step-action" {enrich_disabled}>{enrich_label}</button></form>
-            </article>
-            <article class="workflow-step {step_two_state}" data-stage-card="automation">
-              <div class="step-top">
-                <span class="step-number" data-step-number="automation">{'✓' if automation_complete else '2'}</span>
-                <span class="step-state" data-automation-state>{automation_count}/{automation_total} checked</span>
-              </div>
-              <div class="step-body">
-                <span class="phase-tag">Phase 2</span>
-                <h3>Run web automation</h3>
-                <p>Run automated checks against ServiceNow customer and certified partner portals.</p>
-                <div class="step-metric automation-metric"><strong data-automation-count>{automation_count}</strong><span>of <span data-automation-total>{automation_total}</span> ready records checked</span></div>
-                <div class="stage-progress" role="progressbar" aria-label="Web automation progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{automation_percent}" data-progress="automation"><span style="width:{automation_percent}%"></span></div>
-              </div>
-              <div class="step-actions">
-                <form method="post" action="/runs/{selected_run}/launch-browser"><button {automation_disabled}>Open ServiceNow</button></form>
-                <form class="async-stage-form" data-stage="automation" method="post" action="/runs/{selected_run}/collect"><button class="primary" {automation_disabled}>{automation_label}</button></form>
-              </div>
-            </article>
-            <article class="workflow-step {step_three_state}">
-              <div class="step-top">
-                <span class="step-number">{'✓' if final_complete else '3'}</span>
-                <span class="step-state">{confirmed_count} confirmed</span>
-              </div>
-              <div class="step-body">
-                <span class="phase-tag">Phase 3</span>
-                <h3>Review final results</h3>
-                <p>Review verified customer evidence or export qualified leads.</p>
-                <div class="step-metric"><strong>{confirmed_count}</strong><span>verified high-intent accounts</span></div>
-              </div>
-              <div class="step-actions">
-                {download_action}
-              </div>
-            </article>
-          </div>"""
-        if run["collection_log"]:
-            run_log = f'<details class="run-log"><summary>View latest activity log</summary><pre>{_escape(run["collection_log"])}</pre></details>'
-
-    default_tab = "enriched"
-    enriched_active = default_tab == "enriched"
-    automation_active = default_tab == "automation"
-    final_active = default_tab == "final"
-    final_export = (
-        f'<a class="button primary-export-btn" href="/reports.csv?run_id={selected_run}"><span class="btn-icon">⬇</span> Export Verified Leads (CSV)</a>'
-        if selected_run
-        else '<span class="button disabled-link" aria-disabled="true"><span class="btn-icon">⬇</span> Export CSV</span>'
-    )
-    record_tabs = f"""
-      <div class="record-tabs" role="tablist" aria-label="Workflow records">
-        <button type="button" class="tab-button {'active' if enriched_active else ''}" role="tab" aria-selected="{str(enriched_active).lower()}" aria-controls="panel-enriched" id="tab-enriched" data-tab="enriched">
-          <span>Enriched records</span><strong data-tab-count="enriched">{enriched_count}/{len(rows)}</strong>
-        </button>
-        <button type="button" class="tab-button {'active' if automation_active else ''}" role="tab" aria-selected="{str(automation_active).lower()}" aria-controls="panel-automation" id="tab-automation" data-tab="automation">
-          <span>Web automation</span><strong data-tab-count="automation">{automation_count}/{len(rows)}</strong>
-        </button>
-        <button type="button" class="tab-button {'active' if final_active else ''}" role="tab" aria-selected="{str(final_active).lower()}" aria-controls="panel-final" id="tab-final" data-tab="final">
-          <span>Final table</span><strong data-tab-count="final">{confirmed_count}/{len(rows)}</strong>
-        </button>
-      </div>
-      <div class="tab-panel" id="panel-enriched" role="tabpanel" aria-labelledby="tab-enriched" {'hidden' if not enriched_active else ''}>
-        <div class="panel-heading"><div><h3>Enriched records</h3><p>Prospect identity, verified company profile, and organization intelligence.</p></div></div>
-        <div data-workspace-table="enriched">{_enrichment_table(rows)}</div>
-      </div>
-      <div class="tab-panel" id="panel-automation" role="tabpanel" aria-labelledby="tab-automation" {'hidden' if not automation_active else ''}>
-        <div class="panel-heading"><div><h3>Web automation</h3><p>Real-time ServiceNow customer verification, confidence scores, and visual evidence.</p></div></div>
-        <div data-workspace-table="automation">{_automation_table(rows)}</div>
-      </div>
-      <div class="tab-panel" id="panel-final" role="tabpanel" aria-labelledby="tab-final" {'hidden' if not final_active else ''}>
-        <div class="panel-heading"><div><h3>Final results</h3><p>Confirmed customer &amp; partner relationships with supporting market verification.</p></div>{final_export}</div>
-        <div data-report-stats>{report_stats}</div>
-        <div data-workspace-table="final">{_final_results_table(rows)}</div>
-      </div>"""
-
-    return f"""<!doctype html>
-    <html lang="en"><head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Customer verification workspace — ServiceNow Customer Finder</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet">
-    <style>
-      :root {{
-        --primary:#2563eb;
-        --primary-hover:#1d4ed8;
-        --primary-light:#eff6ff;
-        --primary-border:#bfdbfe;
-        --emerald:#059669;
-        --emerald-light:#ecfdf5;
-        --emerald-border:#a7f3d0;
-        --amber:#d97706;
-        --amber-light:#fffbeb;
-        --amber-border:#fde68a;
-        --rose:#e11d48;
-        --rose-light:#fff1f2;
-        --text-main:#0f172a;
-        --text-muted:#64748b;
-        --text-subtle:#94a3b8;
-        --bg-page:#f8faff;
-        --bg-card:#ffffff;
-        --border:#e2e8f0;
-        --border-subtle:#edf2f7;
-        --radius-sm:6px;
-        --radius-md:10px;
-        --radius-lg:14px;
-        --radius-xl:18px;
-        --shadow-sm:0 1px 3px rgba(0,0,0,0.03);
-        --shadow-md:0 4px 12px rgba(15,23,42,0.05);
-        --shadow-lg:0 10px 24px rgba(15,23,42,0.07);
-      }}
-      * {{ box-sizing:border-box; }}
-      body {{
-        font-family:'Inter', system-ui, -apple-system, sans-serif;
-        max-width:1500px;
-        margin:0 auto;
-        color:var(--text-main);
-        padding:32px 28px 72px;
-        background:var(--bg-page);
-        line-height:1.5;
-      }}
-      h1, h2, h3, h4, .font-headline {{
-        font-family:'Manrope', system-ui, sans-serif;
-        font-weight:750;
-        letter-spacing:-0.025em;
-      }}
-      .muted, small {{ color:var(--text-muted); }}
-
-      /* Executive Header */
-      .page-header {{
-        display:flex;
-        align-items:center;
-        justify-content:space-between;
-        gap:24px;
-        padding:26px 30px;
-        background:var(--bg-card);
-        border:1px solid var(--border);
-        border-radius:var(--radius-xl);
-        box-shadow:var(--shadow-md);
-        margin-bottom:22px;
-        position:relative;
-        overflow:hidden;
-      }}
-      .page-header::before {{
-        content:"";
-        position:absolute;
-        left:0;
-        top:0;
-        bottom:0;
-        width:5px;
-        background:linear-gradient(180deg, var(--primary), var(--emerald));
-      }}
-      .brand-lockup {{
-        display:flex;
-        align-items:center;
-        gap:18px;
-      }}
-      .brand-mark {{
-        width:48px;
-        height:48px;
-        border-radius:12px;
-        background:linear-gradient(135deg, #2563eb, #1e40af);
-        color:#fff;
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        font-family:'Manrope', sans-serif;
-        font-weight:850;
-        font-size:16px;
-        letter-spacing:-0.03em;
-        box-shadow:0 4px 12px rgba(37,99,235,0.25);
-        flex-shrink:0;
-      }}
-      .eyebrow {{
-        display:inline-block;
-        font-size:10px;
-        font-weight:800;
-        letter-spacing:0.12em;
-        text-transform:uppercase;
-        color:var(--primary);
-        margin-bottom:4px;
-      }}
-      .page-header h1 {{
-        margin:0 0 4px;
-        font-size:26px;
-        color:var(--text-main);
-      }}
-      .header-subtitle {{
-        margin:0;
-        font-size:13px;
-        color:var(--text-muted);
-      }}
-      .header-meta {{
-        display:flex;
-        align-items:center;
-        gap:10px;
-        flex-wrap:wrap;
-      }}
-      .live-indicator {{
-        display:inline-flex;
-        align-items:center;
-        gap:7px;
-        padding:6px 12px;
-        background:var(--primary-light);
-        border:1px solid var(--primary-border);
-        border-radius:999px;
-        color:var(--primary);
-        font-size:11px;
-        font-weight:700;
-      }}
-      .live-indicator i {{
-        width:7px;
-        height:7px;
-        border-radius:50%;
-        background:var(--primary);
-        box-shadow:0 0 0 3px rgba(37,99,235,0.2);
-      }}
-      .session-status {{
-        display:inline-flex;
-        align-items:center;
-        gap:7px;
-        padding:6px 12px;
-        border-radius:999px;
-        font-size:11px;
-        font-weight:700;
-      }}
-      .session-status::before {{
-        content:"";
-        width:7px;
-        height:7px;
-        border-radius:50%;
-        background:currentColor;
-      }}
-      .session-status.waiting {{ background:var(--amber-light); color:var(--amber); border:1px solid var(--amber-border); }}
-      .session-status.logged-in, .session-status.ready {{ background:var(--emerald-light); color:var(--emerald); border:1px solid var(--emerald-border); }}
-      .session-status.working, .session-status.running {{ background:var(--primary-light); color:var(--primary); border:1px solid var(--primary-border); }}
-      .session-status.failed {{ background:var(--rose-light); color:var(--rose); border:1px solid #fecaca; }}
-
-      /* Messages */
-      .message {{
-        padding:12px 18px;
-        border-radius:var(--radius-md);
-        font-size:13px;
-        font-weight:600;
-        margin-bottom:20px;
-      }}
-      .message.success {{ background:var(--emerald-light); color:var(--emerald); border:1px solid var(--emerald-border); }}
-      .message.error {{ background:var(--rose-light); color:var(--rose); border:1px solid #fecaca; }}
-
-      /* Executive KPI Bento Grid */
-      .overview-stats {{
-        display:grid;
-        grid-template-columns:repeat(4, minmax(0, 1fr));
-        gap:16px;
-        margin-bottom:24px;
-      }}
-      .overview-stat {{
-        background:var(--bg-card);
-        border:1px solid var(--border);
-        border-radius:var(--radius-lg);
-        padding:20px;
-        box-shadow:var(--shadow-sm);
-        display:flex;
-        flex-direction:column;
-        justify-content:space-between;
-        min-height:130px;
-        position:relative;
-        overflow:hidden;
-        transition:transform 0.2s ease, box-shadow 0.2s ease;
-      }}
-      .overview-stat:hover {{
-        transform:translateY(-2px);
-        box-shadow:var(--shadow-md);
-      }}
-      .overview-stat.highlight-emerald {{
-        border-color:rgba(5, 150, 105, 0.3);
-        background:linear-gradient(180deg, #ffffff 0%, #f0fdf4 100%);
-      }}
-      .stat-top {{
-        display:flex;
-        align-items:center;
-        justify-content:space-between;
-        margin-bottom:12px;
-      }}
-      .stat-icon {{
-        width:34px;
-        height:34px;
-        border-radius:8px;
-        background:#f1f5f9;
-        color:#475569;
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        font-size:15px;
-      }}
-      .stat-icon.approved {{ background:var(--emerald-light); color:var(--emerald); font-weight:800; }}
-      .stat-tag {{
-        font-size:10px;
-        font-weight:700;
-        color:var(--text-muted);
-        text-transform:uppercase;
-        letter-spacing:0.06em;
-      }}
-      .stat-trend {{
-        font-size:10px;
-        font-weight:800;
-        color:var(--emerald);
-        background:var(--emerald-light);
-        border:1px solid var(--emerald-border);
-        padding:2px 7px;
-        border-radius:999px;
-      }}
-      .stat-val strong {{
-        display:block;
-        font-family:'Manrope', sans-serif;
-        font-size:28px;
-        font-weight:800;
-        letter-spacing:-0.03em;
-        line-height:1.1;
-        color:var(--text-main);
-      }}
-      .stat-val strong.text-emerald {{
-        color:var(--emerald);
-      }}
-      .stat-name {{
-        display:block;
-        font-size:12px;
-        font-weight:700;
-        color:var(--text-main);
-        margin-top:4px;
-      }}
-      .stat-subtext {{
-        display:block;
-        font-size:11px;
-        color:var(--text-muted);
-        margin-top:1px;
-      }}
-
-      /* Upload Section */
-      .upload-section {{
-        background:var(--bg-card);
-        border:1px solid var(--border);
-        border-radius:var(--radius-lg);
-        padding:22px 26px;
-        box-shadow:var(--shadow-sm);
-        margin-bottom:24px;
-        display:flex;
-        align-items:center;
-        justify-content:space-between;
-        gap:24px;
-        background:linear-gradient(135deg, #ffffff 0%, #f8faff 100%);
-      }}
-      .upload-copy {{
-        display:flex;
-        align-items:center;
-        gap:16px;
-      }}
-      .upload-icon {{
-        width:44px;
-        height:44px;
-        border-radius:12px;
-        background:var(--primary-light);
-        color:var(--primary);
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        flex-shrink:0;
-      }}
-      .upload-icon svg {{ width:22px; height:22px; }}
-      .section-kicker {{
-        display:inline-block;
-        font-size:10px;
-        font-weight:800;
-        letter-spacing:0.1em;
-        text-transform:uppercase;
-        color:var(--primary);
-        margin-bottom:2px;
-      }}
-      .upload-copy h2 {{
-        margin:0 0 4px;
-        font-size:17px;
-        color:var(--text-main);
-      }}
-      .upload-copy p {{
-        margin:0;
-        font-size:13px;
-        color:var(--text-muted);
-        max-width:680px;
-      }}
-      .upload-section form {{
-        display:flex;
-        align-items:center;
-        gap:12px;
-        margin:0;
-      }}
-      input[type="file"] {{
-        padding:6px;
-        font-size:12px;
-        border:1px dashed var(--border);
-        border-radius:var(--radius-md);
-        background:#fff;
-        color:var(--text-muted);
-        max-width:270px;
-      }}
-      input[type="file"]::file-selector-button {{
-        padding:6px 12px;
-        border:0;
-        border-radius:6px;
-        background:#f1f5f9;
-        color:var(--text-main);
-        font-weight:600;
-        font-size:12px;
-        cursor:pointer;
-        margin-right:8px;
-        transition:background 0.15s;
-      }}
-      input[type="file"]::file-selector-button:hover {{
-        background:#e2e8f0;
-      }}
-
-      /* Buttons */
-      button, .button {{
-        padding:9px 16px;
-        border:1px solid var(--border);
-        border-radius:var(--radius-md);
-        background:#ffffff;
-        color:var(--text-main);
-        font-family:'Inter', sans-serif;
-        font-size:13px;
-        font-weight:650;
-        cursor:pointer;
-        display:inline-flex;
-        align-items:center;
-        gap:6px;
-        text-decoration:none;
-        transition:all 0.15s ease;
-      }}
-      button:hover, .button:hover {{
-        background:#f8fafc;
-        border-color:#cbd5e1;
-        transform:translateY(-1px);
-      }}
-      button.primary, .primary-link, .primary-export-btn {{
-        background:var(--primary);
-        border-color:var(--primary);
-        color:#fff !important;
-        box-shadow:0 2px 6px rgba(37,99,235,0.25);
-      }}
-      button.primary:hover, .primary-link:hover, .primary-export-btn:hover {{
-        background:var(--primary-hover);
-        border-color:var(--primary-hover);
-        box-shadow:0 4px 12px rgba(37,99,235,0.3);
-      }}
-      button:disabled, .disabled-link {{
-        opacity:0.5;
-        cursor:not-allowed;
-        transform:none !important;
-      }}
-
-      /* Workflow Section */
-      .workflow-section {{
-        background:var(--bg-card);
-        border:1px solid var(--border);
-        border-radius:var(--radius-lg);
-        padding:26px 28px;
-        box-shadow:var(--shadow-sm);
-        margin-bottom:24px;
-      }}
-      .section-heading {{
-        display:flex;
-        align-items:flex-end;
-        justify-content:space-between;
-        gap:20px;
-        margin-bottom:22px;
-      }}
-      .section-heading h2 {{
-        margin:0 0 4px;
-        font-size:20px;
-      }}
-      .section-heading p {{
-        margin:0;
-        font-size:13px;
-        color:var(--text-muted);
-      }}
-      .run-picker {{
-        display:flex;
-        align-items:center;
-        gap:10px;
-        margin:0;
-        padding:6px 10px;
-        background:#f8fafc;
-        border:1px solid var(--border);
-        border-radius:var(--radius-md);
-      }}
-      .run-picker label {{
-        font-size:11px;
-        font-weight:700;
-        color:var(--text-muted);
-        text-transform:uppercase;
-      }}
-      .run-picker select {{
-        border:0;
-        background:transparent;
-        font-size:12px;
-        font-weight:600;
-        color:var(--text-main);
-        cursor:pointer;
-        outline:none;
-      }}
-      .run-status {{
-        font-size:11px;
-        font-weight:700;
-        padding:3px 8px;
-        border-radius:999px;
-        background:var(--primary-light);
-        color:var(--primary);
-      }}
-
-      /* 3-Step Action Workflow */
-      .workflow-progress {{
-        display:grid;
-        grid-template-columns:repeat(3, minmax(0, 1fr));
-        gap:18px;
-        position:relative;
-      }}
-      .workflow-step {{
-        background:var(--bg-card);
-        border:1px solid var(--border);
-        border-radius:var(--radius-lg);
-        padding:22px;
-        display:flex;
-        flex-direction:column;
-        justify-content:space-between;
-        min-height:260px;
-        position:relative;
-        transition:all 0.2s ease;
-      }}
-      .workflow-step::before {{
-        content:"";
-        position:absolute;
-        top:0;
-        left:0;
-        right:0;
-        height:4px;
-        border-radius:var(--radius-lg) var(--radius-lg) 0 0;
-        background:#cbd5e1;
-      }}
-      .workflow-step.active {{
-        border-color:var(--primary-border);
-        box-shadow:var(--shadow-md);
-        background:#ffffff;
-      }}
-      .workflow-step.active::before {{
-        background:var(--primary);
-      }}
-      .workflow-step.complete {{
-        border-color:var(--emerald-border);
-        background:#fafdfb;
-      }}
-      .workflow-step.complete::before {{
-        background:var(--emerald);
-      }}
-      .workflow-step.locked {{
-        opacity:0.65;
-        background:#fcfdfe;
-      }}
-      .step-top {{
-        display:flex;
-        align-items:center;
-        justify-content:space-between;
-        margin-bottom:14px;
-      }}
-      .step-number {{
-        width:30px;
-        height:30px;
-        border-radius:50%;
-        background:#f1f5f9;
-        color:#475569;
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        font-family:'Manrope', sans-serif;
-        font-size:13px;
-        font-weight:800;
-      }}
-      .workflow-step.active .step-number {{
-        background:var(--primary);
-        color:#fff;
-      }}
-      .workflow-step.complete .step-number {{
-        background:var(--emerald);
-        color:#fff;
-      }}
-      .step-state {{
-        font-size:11px;
-        font-weight:700;
-        color:var(--text-muted);
-        background:#f1f5f9;
-        padding:3px 8px;
-        border-radius:999px;
-      }}
-      .workflow-step.active .step-state {{
-        background:var(--primary-light);
-        color:var(--primary);
-      }}
-      .workflow-step.complete .step-state {{
-        background:var(--emerald-light);
-        color:var(--emerald);
-      }}
-      .phase-tag {{
-        font-size:10px;
-        font-weight:800;
-        text-transform:uppercase;
-        letter-spacing:0.08em;
-        color:var(--primary);
-        display:block;
-        margin-bottom:2px;
-      }}
-      .workflow-step h3 {{
-        margin:0 0 6px;
-        font-size:17px;
-        color:var(--text-main);
-      }}
-      .workflow-step p {{
-        margin:0 0 14px;
-        font-size:13px;
-        color:var(--text-muted);
-        line-height:1.45;
-      }}
-      .step-metric {{
-        display:flex;
-        align-items:baseline;
-        gap:6px;
-        margin-bottom:12px;
-      }}
-      .step-metric strong {{
-        font-family:'Manrope', sans-serif;
-        font-size:22px;
-        font-weight:800;
-        color:var(--text-main);
-      }}
-      .step-metric span {{
-        font-size:12px;
-        color:var(--text-muted);
-      }}
-      .stage-progress {{
-        width:100%;
-        height:6px;
-        background:#e2e8f0;
-        border-radius:999px;
-        overflow:hidden;
-        margin-bottom:16px;
-      }}
-      .stage-progress span {{
-        display:block;
-        height:100%;
-        background:var(--primary);
-        border-radius:999px;
-        transition:width 0.35s ease;
-      }}
-      .workflow-step.complete .stage-progress span {{
-        background:var(--emerald);
-      }}
-      .step-actions {{
-        display:flex;
-        align-items:center;
-        gap:8px;
-        flex-wrap:wrap;
-        margin-top:auto;
-      }}
-      .step-actions form, .workflow-step > form {{
-        margin:0;
-      }}
-
-      /* Records Workspace */
-      .records-workspace {{
-        background:var(--bg-card);
-        border:1px solid var(--border);
-        border-radius:var(--radius-lg);
-        box-shadow:var(--shadow-sm);
-        margin-bottom:24px;
-        overflow:hidden;
-      }}
-      .records-heading {{
-        padding:24px 28px 16px;
-        display:flex;
-        align-items:center;
-        justify-content:space-between;
-        gap:20px;
-        border-bottom:1px solid var(--border);
-      }}
-      .records-heading h2 {{
-        margin:0 0 4px;
-        font-size:20px;
-      }}
-      .records-heading p {{
-        margin:0;
-        font-size:13px;
-        color:var(--text-muted);
-      }}
-      .record-tabs {{
-        display:flex;
-        gap:6px;
-        padding:12px 28px 0;
-        background:#f8fafc;
-        border-bottom:1px solid var(--border);
-        overflow-x:auto;
-      }}
-      .tab-button {{
-        display:inline-flex;
-        align-items:center;
-        gap:8px;
-        padding:10px 16px 12px;
-        border:0;
-        border-bottom:2px solid transparent;
-        border-radius:0;
-        background:transparent;
-        color:var(--text-muted);
-        font-size:13px;
-        font-weight:650;
-        white-space:nowrap;
-        transform:none !important;
-      }}
-      .tab-button:hover {{
-        color:var(--text-main);
-        background:transparent;
-      }}
-      .tab-button.active {{
-        border-bottom-color:var(--primary);
-        color:var(--primary);
-        font-weight:750;
-      }}
-      .tab-button strong {{
-        font-size:11px;
-        padding:2px 7px;
-        border-radius:999px;
-        background:#e2e8f0;
-        color:var(--text-main);
-      }}
-      .tab-button.active strong {{
-        background:var(--primary-light);
-        color:var(--primary);
-      }}
-      .tab-panel {{
-        padding:24px 28px;
-      }}
-      .tab-panel[hidden] {{ display:none; }}
-      .panel-heading {{
-        display:flex;
-        align-items:center;
-        justify-content:space-between;
-        gap:20px;
-        margin-bottom:18px;
-      }}
-      .panel-heading h3 {{
-        margin:0 0 4px;
-        font-size:16px;
-      }}
-      .panel-heading p {{
-        margin:0;
-        font-size:13px;
-        color:var(--text-muted);
-      }}
-
-      /* Tables with Subtle Row Borders */
-      .table-scroll {{
-        overflow-x:auto;
-        border:1px solid var(--border);
-        border-radius:var(--radius-md);
-        background:#ffffff;
-        box-shadow:0 1px 2px rgba(0,0,0,0.02);
-      }}
-      .data-table {{
-        width:100%;
-        border-collapse:collapse;
-        font-size:13px;
-        text-align:left;
-      }}
-      .data-table th {{
-        padding:13px 18px;
-        background:#f8fafc;
-        color:#475569;
-        font-family:'Manrope', sans-serif;
-        font-size:11px;
-        font-weight:700;
-        letter-spacing:0.05em;
-        text-transform:uppercase;
-        border-bottom:1px solid #cbd5e1;
-        white-space:nowrap;
-      }}
-      .data-table tbody tr {{
-        border-bottom:1px solid #e2e8f0;
-        transition:background 0.15s ease;
-      }}
-      .data-table tbody tr:last-child {{
-        border-bottom:none;
-      }}
-      .data-table td {{
-        padding:14px 18px;
-        border-bottom:1px solid #e2e8f0;
-        vertical-align:middle;
-        color:#1e293b;
-      }}
-      .data-table tbody tr:hover {{
-        background:#f8fafc;
-      }}
-      .table-empty {{
-        padding:48px 20px !important;
-        text-align:center;
-        color:var(--text-muted);
-        font-size:13px;
-      }}
-
-      /* Final Records with Subtle Row Borders */
-      .final-records {{
-        border:1px solid var(--border);
-        border-radius:var(--radius-md);
-        background:#ffffff;
-        box-shadow:0 1px 2px rgba(0,0,0,0.02);
-        overflow:hidden;
-      }}
-      .final-record-header {{
-        display:grid;
-        grid-template-columns:minmax(240px, 1.4fr) minmax(130px, 0.7fr) minmax(130px, 0.7fr) minmax(180px, 1fr) minmax(110px, 0.6fr) 90px;
-        align-items:center;
-        gap:16px;
-        padding:13px 18px;
-        background:#f8fafc;
-        color:#475569;
-        font-family:'Manrope', sans-serif;
-        font-size:11px;
-        font-weight:700;
-        letter-spacing:0.05em;
-        text-transform:uppercase;
-        border-bottom:1px solid #cbd5e1;
-      }}
-      .final-record {{
-        border-bottom:1px solid #e2e8f0;
-        background:#ffffff;
-        transition:background 0.15s ease;
-      }}
-      .final-record:last-child {{
-        border-bottom:none;
-      }}
-      .final-record:hover {{
-        background:#f8fafc;
-      }}
-      .final-record[open] > .final-record-summary {{
-        background:#f0f7ff;
-        border-bottom:1px solid #e2e8f0;
-      }}
-      .final-record-summary {{
-        display:grid;
-        grid-template-columns:minmax(240px, 1.4fr) minmax(130px, 0.7fr) minmax(130px, 0.7fr) minmax(180px, 1fr) minmax(110px, 0.6fr) 90px;
-        align-items:center;
-        gap:16px;
-        padding:15px 18px;
-        cursor:pointer;
-        list-style:none;
-      }}
-      .final-record-summary::-webkit-details-marker {{ display:none; }}
-      .final-cell {{ min-width:0; font-size:13px; }}
-      .record-expand {{
-        display:flex;
-        align-items:center;
-        justify-content:flex-end;
-        gap:4px;
-        font-size:11px;
-        font-weight:700;
-        color:var(--primary);
-      }}
-      .chevron {{ font-size:15px; transition:transform 0.2s; }}
-      .final-record[open] .chevron {{ transform:rotate(180deg); }}
-      .final-record[open] .expand-text {{ font-size:0; }}
-      .final-record[open] .expand-text::after {{ content:"Hide"; font-size:11px; }}
-
-      /* Prospect Profile in Cell */
-      .prospect-profile {{
-        display:flex;
-        align-items:center;
-        gap:12px;
-      }}
-      .prospect-avatar {{
-        width:34px;
-        height:34px;
-        border-radius:8px;
-        background:linear-gradient(135deg, #3b82f6, #1d4ed8);
-        color:#fff;
-        font-family:'Manrope', sans-serif;
-        font-size:11px;
-        font-weight:800;
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        flex-shrink:0;
-        box-shadow:0 2px 5px rgba(37,99,235,0.2);
-      }}
-      .prospect-info {{
-        display:flex;
-        flex-direction:column;
-        gap:2px;
-        min-width:0;
-      }}
-      .table-person {{
-        font-weight:700;
-        color:var(--text-main);
-        text-decoration:none;
-        font-size:13px;
-      }}
-      a.table-person:hover {{
-        color:var(--primary);
-        text-decoration:underline;
-      }}
-      .cell-secondary {{
-        font-size:11px;
-        color:var(--text-muted);
-        display:block;
-      }}
-      .cell-error {{
-        font-size:11px;
-        color:var(--rose);
-        display:block;
-        margin-top:4px;
-      }}
-      .location-tag {{
-        font-size:12px;
-        color:var(--text-muted);
-      }}
-      .time-tag {{
-        font-size:11px;
-        color:var(--text-muted);
-      }}
-      .confidence-badge {{
-        display:inline-block;
-        font-size:10px;
-        font-weight:700;
-        padding:2px 6px;
-        border-radius:999px;
-        background:#f1f5f9;
-        color:#475569;
-        margin-left:4px;
-      }}
-      .footprint-pill {{
-        display:inline-flex;
-        align-items:center;
-        padding:3px 8px;
-        border-radius:999px;
-        font-size:11px;
-        font-weight:700;
-        background:#f1f5f9;
-        color:#475569;
-      }}
-
-      /* Status Badges */
-      .status-pill {{
-        display:inline-flex;
-        align-items:center;
-        gap:5px;
-        padding:3px 9px;
-        border-radius:999px;
-        font-size:11px;
-        font-weight:700;
-        white-space:nowrap;
-        border:1px solid transparent;
-      }}
-      .status-pill.success, .status-pill.positive {{ background:var(--emerald-light); color:var(--emerald); border-color:var(--emerald-border); }}
-      .status-pill.warning {{ background:var(--amber-light); color:var(--amber); border-color:var(--amber-border); }}
-      .status-pill.danger {{ background:var(--rose-light); color:var(--rose); border-color:#fecaca; }}
-      .status-pill.info {{ background:var(--primary-light); color:var(--primary); border-color:var(--primary-border); }}
-      .status-pill.neutral {{ background:#f1f5f9; color:#475569; border-color:var(--border); }}
-
-      /* Source Tags */
-      .source-tags {{ display:flex; gap:4px; flex-wrap:wrap; }}
-      .source-tag {{
-        display:inline-flex;
-        align-items:center;
-        padding:3px 8px;
-        border-radius:999px;
-        background:var(--primary-light);
-        border:1px solid var(--primary-border);
-        color:var(--primary);
-        font-size:11px;
-        font-weight:650;
-      }}
-
-      /* Company Resolution Details & AI Button */
-      .table-review {{ margin-top:8px; }}
-      .table-review summary {{
-        cursor:pointer;
-        font-size:11px;
-        font-weight:700;
-        color:var(--primary);
-      }}
-      .table-review p {{
-        font-size:11px;
-        color:var(--amber);
-        margin:6px 0;
-      }}
-      .company-override {{
-        display:flex;
-        flex-direction:column;
-        gap:6px;
-        margin-top:6px;
-      }}
-      .company-input-group {{
-        display:flex;
-        align-items:center;
-        gap:6px;
-      }}
-      .company-input-group input {{
-        padding:5px 8px;
-        font-size:12px;
-        border:1px solid var(--border);
-        border-radius:6px;
-        width:170px;
-      }}
-      .ai-resolve-btn {{
-        padding:5px 8px;
-        font-size:11px;
-        font-weight:750;
-        background:#eff6ff;
-        color:var(--primary);
-        border:1px solid var(--primary-border);
-        border-radius:6px;
-        cursor:pointer;
-        white-space:nowrap;
-        transition:all 0.15s;
-      }}
-      .ai-resolve-btn:hover:not(:disabled) {{
-        background:#dbeafe;
-        transform:translateY(-1px);
-      }}
-      .ai-status-msg {{
-        font-size:11px;
-        padding:3px 6px;
-        border-radius:4px;
-        max-width:240px;
-      }}
-      .ai-status-msg.success {{ background:var(--emerald-light); color:var(--emerald); }}
-      .ai-status-msg.error {{ background:var(--rose-light); color:var(--rose); }}
-
-      /* Expanded Details */
-      .final-record-details {{
-        padding:20px 24px;
-        background:#f8fafc;
-        border-top:1px solid var(--border);
-      }}
-      .final-record-facts {{
-        display:grid;
-        grid-template-columns:repeat(5, minmax(0, 1fr));
-        gap:1px;
-        background:var(--border);
-        border:1px solid var(--border);
-        border-radius:var(--radius-md);
-        overflow:hidden;
-        margin-bottom:18px;
-      }}
-      .final-record-facts > div {{
-        background:#ffffff;
-        padding:12px 14px;
-        display:flex;
-        flex-direction:column;
-        gap:3px;
-      }}
-      .final-record-facts span {{
-        font-size:10px;
-        font-weight:750;
-        color:var(--text-muted);
-        text-transform:uppercase;
-        letter-spacing:0.04em;
-      }}
-      .final-record-facts strong {{
-        font-size:12px;
-        color:var(--text-main);
-      }}
-      .final-record-evidence {{
-        display:grid;
-        grid-template-columns:1.4fr 1fr;
-        gap:16px;
-      }}
-      .final-evidence-card {{
-        background:#ffffff;
-        border:1px solid var(--border);
-        border-radius:var(--radius-md);
-        padding:16px;
-      }}
-      .evidence-title {{
-        margin-bottom:10px;
-      }}
-      .evidence-title span {{
-        display:block;
-        font-size:13px;
-        font-weight:750;
-        color:var(--text-main);
-      }}
-      .evidence-title small {{
-        font-size:11px;
-        color:var(--text-muted);
-      }}
-      .screenshot-preview-link {{
-        display:block;
-        position:relative;
-        border-radius:8px;
-        overflow:hidden;
-        border:1px solid var(--border);
-      }}
-      .screenshot-preview-link img {{
-        display:block;
-        width:100%;
-        max-height:220px;
-        object-fit:cover;
-        object-position:top;
-      }}
-      .preview-overlay {{
-        position:absolute;
-        inset:0;
-        background:rgba(15,23,42,0.4);
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        opacity:0;
-        transition:opacity 0.2s;
-        color:#fff;
-        font-size:12px;
-        font-weight:700;
-      }}
-      .screenshot-preview-link:hover .preview-overlay {{
-        opacity:1;
-      }}
-      .citation-list {{
-        margin:0;
-        padding-left:18px;
-        font-size:12px;
-      }}
-      .citation-list li {{ margin-bottom:6px; }}
-      .citation-list a {{ color:var(--primary); }}
-      .verification-card p {{
-        margin:0;
-        font-size:12px;
-        color:var(--text-muted);
-        line-height:1.5;
-      }}
-      .evidence-empty {{
-        display:flex;
-        align-items:center;
-      }}
-
-      /* Report Stats */
-      .report-stats {{
-        display:grid;
-        grid-template-columns:repeat(4, minmax(0, 1fr));
-        gap:1px;
-        background:var(--border);
-        border:1px solid var(--border);
-        border-radius:var(--radius-md);
-        overflow:hidden;
-        margin-bottom:18px;
-      }}
-      .report-stats div {{
-        background:#fafbfc;
-        padding:14px 18px;
-        display:flex;
-        flex-direction:column;
-        gap:2px;
-      }}
-      .report-stats strong {{ font-size:22px; font-family:'Manrope', sans-serif; }}
-      .report-stats span {{ font-size:12px; color:var(--text-muted); }}
-
-      /* Footer */
-      .app-footer {{
-        margin-top:32px;
-        padding-top:18px;
-        border-top:1px solid var(--border);
-      }}
-      .maintenance summary {{
-        cursor:pointer;
-        font-size:12px;
-        font-weight:600;
-        color:var(--text-muted);
-      }}
-      .maintenance-body {{
-        margin-top:10px;
-        padding:14px;
-        background:#ffffff;
-        border:1px solid var(--border);
-        border-radius:var(--radius-md);
-        font-size:12px;
-        color:var(--text-muted);
-      }}
-      .danger-btn {{
-        background:#fff;
-        border-color:#fca5a5;
-        color:#dc2626;
-        font-size:12px;
-        padding:6px 12px;
-      }}
-      .danger-btn:hover {{
-        background:#fef2f2;
-        border-color:#f87171;
-      }}
-
-      @media (prefers-reduced-motion:reduce) {{
-        *, *::before, *::after {{
-          animation:none !important;
-          transition:none !important;
-        }}
-      }}
-      @media (max-width:1050px) {{
-        .overview-stats {{ grid-template-columns:repeat(2, 1fr); }}
-        .final-record-header {{ display:none; }}
-        .final-record-summary {{ grid-template-columns:minmax(200px, 1fr) repeat(2, minmax(110px, 0.6fr)) 80px; }}
-        .final-record-summary .final-cell:nth-child(4), .final-record-summary .final-cell:nth-child(5) {{ display:none; }}
-        .final-record-facts {{ grid-template-columns:1fr 1fr; }}
-      }}
-      @media (max-width:850px) {{
-        body {{ padding:18px 14px 48px; }}
-        .page-header {{ flex-direction:column; align-items:flex-start; padding:20px; }}
-        .upload-section {{ flex-direction:column; align-items:flex-start; }}
-        .workflow-progress {{ grid-template-columns:1fr; }}
-        .final-record-evidence {{ grid-template-columns:1fr; }}
-      }}
-    </style>
-    </head><body>
-      <header class="page-header">
-        <div class="brand-lockup">
-          <div class="brand-mark" aria-hidden="true">SN</div>
-          <div>
-            <span class="eyebrow">Enterprise Intelligence</span>
-            <h1>Customer verification workspace</h1>
-            <p class="header-subtitle">Identify ServiceNow customers and certified ecosystem partners with automated evidence verification.</p>
-          </div>
-        </div>
-        <div class="header-meta">
-          <span class="live-indicator"><i aria-hidden="true"></i>Executive Workspace</span>
-          <span id="login-status" class="session-status {login_tone}" title="{_escape(login_snapshot.detail)}">{_escape(login_snapshot.status)}</span>
-        </div>
-      </header>
-
-      {_message(request)}
-      {overview_stats}
-
-      <section class="upload-section">
-        <div class="upload-copy">
-          <span class="upload-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </span>
-          <div>
-            <span class="section-kicker">Step 1 &middot; Import Data</span>
-            <h2>Upload Prospect Accounts</h2>
-            <p class="muted">Rows with a company name go directly to company enrichment. For other rows, include the person’s name and LinkedIn URL for automatic company resolution.</p>
-          </div>
-        </div>
-        <form method="post" action="/runs" enctype="multipart/form-data">
-          <input type="file" name="file" accept=".csv,text/csv" aria-label="Choose people CSV" required>
-          <button class="primary upload-btn"><span class="btn-icon">⬆</span> Upload CSV</button>
-        </form>
-      </section>
-
-      <section class="workflow-section">
-        <div class="section-heading">
-          <div>
-            <span class="section-kicker">3-Phase Pipeline</span>
-            <h2>Workflow progress</h2>
-            <p class="muted">Complete each stage from left to right.</p>
-          </div>
-          <form class="run-picker" method="get" action="/">
-            <label for="run-select">Selected Batch</label>
-            <select id="run-select" name="run_id" onchange="this.form.submit()">{options}</select>
-            {f'<span class="run-status">{_pretty_status(run["status"])}</span>' if run else ''}
-          </form>
-        </div>
-        {workflow_steps}
-        {run_log}
-      </section>
-
-      <section class="records-workspace">
-        <div class="records-heading">
-          <div>
-            <span class="section-kicker">Account Intelligence</span>
-            <h2>Records</h2>
-            <p class="muted">Switch views to inspect the data produced at each workflow stage.</p>
-          </div>
-        </div>
-        {record_tabs}
-      </section>
-
-      <footer class="app-footer">
-        <details class="maintenance">
-          <summary>Database maintenance</summary>
-          <div class="maintenance-body">
-            <p>Clears local workflow runs and reports only. CSV files, configuration, Chrome profile, and source code remain unchanged.</p>
-            <form method="post" action="/database/clear" onsubmit="return confirm('Delete every local workflow run and report? This cannot be undone.');">
-              <button class="danger-btn">Clear database</button>
-            </form>
-          </div>
-        </details>
-      </footer>
-
-      <script>
-
-        const tabButtons = Array.from(document.querySelectorAll('.tab-button'));
-
-        const tabPanels = Array.from(document.querySelectorAll('.tab-panel'));
-
-        function activateTab(name, updateHash = true) {{
-
-          if (!tabButtons.some(button => button.dataset.tab === name)) return;
-
-          tabButtons.forEach(button => {{
-
-            const active = button.dataset.tab === name;
-
-            button.classList.toggle('active', active);
-
-            button.setAttribute('aria-selected', String(active));
-
-          }});
-
-          tabPanels.forEach(panel => {{ panel.hidden = panel.id !== `panel-${{name}}`; }});
-
-          if (updateHash) history.replaceState(null, '', `#${{name}}`);
-
-        }}
-
-        tabButtons.forEach(button => button.addEventListener('click', () => activateTab(button.dataset.tab)));
-
-        const requestedTab = location.hash.slice(1);
-
-        if (requestedTab) activateTab(requestedTab, false);
-
-
-
-        const workflowProgress = document.getElementById('workflow-progress');
-
-        const loginStatus = document.getElementById('login-status');
-
-        let progressTimer = null;
-
-        let workflowWasBusy = workflowProgress?.dataset.busy === 'true';
-
-
-
-        function setText(selector, value) {{
-
-          const element = document.querySelector(selector);
-
-          if (element) element.textContent = value;
-
-        }}
-
-
-
-        function applyProgress(data) {{
-
-          const enrichCard = document.querySelector('[data-stage-card="enrich"]');
-
-          const automationCard = document.querySelector('[data-stage-card="automation"]');
-
-          [[enrichCard, data.enrich_state], [automationCard, data.automation_state]].forEach(([card, state]) => {{
-
-            if (!card) return;
-
-            card.classList.remove('active', 'complete', 'locked');
-
-            card.classList.add(state);
-
-          }});
-
-          setText('[data-step-number="enrich"]', data.enrichment_complete ? '✓' : '1');
-
-          setText('[data-step-number="automation"]', data.automation_complete ? '✓' : '2');
-
-          setText('[data-approved-count]', `${{data.approved}}/${{data.total}} approved`);
-
-          setText('[data-enriched-count]', data.processed);
-
-          setText('[data-enrichment-total]', data.target);
-
-          setText('[data-enrichment-failures]', data.failed_enrichment ? ` · ${{data.failed_enrichment}} needs attention` : '');
-
-          setText('[data-automation-count]', data.automated);
-
-          setText('[data-automation-total]', data.automation_target);
-
-          setText('[data-automation-state]', `${{data.automated}}/${{data.automation_target}} checked`);
-
-          setText('[data-tab-count="enriched"]', `${{data.enriched}}/${{data.total}}`);
-
-          setText('[data-tab-count="automation"]', `${{data.automated}}/${{data.total}}`);
-
-          setText('[data-tab-count="final"]', `${{data.confirmed}}/${{data.total}}`);
-
-          setText('.run-status', data.run_status_label);
-
-
-
-          [['enrich', data.enrichment_percent], ['automation', data.automation_percent]].forEach(([stage, percent]) => {{
-
-            const progress = document.querySelector(`[data-progress="${{stage}}"]`);
-
-            if (!progress) return;
-
-            progress.setAttribute('aria-valuenow', String(percent));
-
-            const fill = progress.querySelector('span');
-
-            if (fill) fill.style.width = `${{percent}}%`;
-
-          }});
-
-
-
-          const enrichButton = document.querySelector('.async-stage-form[data-stage="enrich"] button');
-
-          const automationButton = document.querySelector('.async-stage-form[data-stage="automation"] button');
-
-          const openBrowserButton = document.querySelector('[data-stage-card="automation"] .step-actions form:not(.async-stage-form) button');
-
-          if (enrichButton) {{ enrichButton.disabled = !data.can_enrich; enrichButton.textContent = data.enrich_label; }}
-
-          if (automationButton) {{ automationButton.disabled = !data.can_automate; automationButton.textContent = data.automation_label; }}
-
-          if (openBrowserButton) openBrowserButton.disabled = !data.can_automate;
-
-        }}
-
-
-
-        async function refreshWorkspace(runId) {{
-
-          const response = await fetch(`/api/runs/${{runId}}/workspace`, {{cache:'no-store'}});
-
-          if (!response.ok) return;
-
-          const workspace = await response.json();
-
-          Object.entries(workspace).forEach(([name, markup]) => {{
-
-            const target = document.querySelector(`[data-workspace-table="${{name}}"]`);
-
-            if (target) target.innerHTML = markup;
-
-          }});
-
-        }}
-
-
-
-        async function pollProgress() {{
-
-          if (!workflowProgress) return;
-
-          progressTimer = null;
-
-          const runId = workflowProgress.dataset.runId;
-
-          try {{
-
-            const response = await fetch(`/api/runs/${{runId}}/progress`, {{cache:'no-store'}});
-
-            if (!response.ok) throw new Error('Progress request failed');
-
-            const data = await response.json();
-
-            const finished = workflowWasBusy && !data.busy;
-
-            applyProgress(data);
-
-            workflowWasBusy = data.busy;
-
-            if (finished) await refreshWorkspace(runId);
-
-            if (data.busy) progressTimer = window.setTimeout(pollProgress, 1000);
-
-          }} catch (_error) {{
-
-            if (workflowWasBusy) progressTimer = window.setTimeout(pollProgress, 2000);
-
-          }}
-
-        }}
-
-
-
-        document.querySelectorAll('.async-stage-form').forEach(form => {{
-
-          form.addEventListener('submit', event => {{
-
-            event.preventDefault();
-
-            const button = form.querySelector('button');
-
-            if (!button || button.disabled) return;
-
-            button.disabled = true;
-
-            button.textContent = form.dataset.stage === 'enrich' ? 'Starting enrichment…' : 'Starting automation…';
-
-            workflowWasBusy = true;
-
-            if (progressTimer) window.clearTimeout(progressTimer);
-
-            const startRequest = fetch(form.action, {{method:'POST', redirect:'follow'}});
-
-            progressTimer = window.setTimeout(pollProgress, 250);
-
-            startRequest.then(() => {{
-
-              if (!workflowWasBusy) {{
-
-                workflowWasBusy = true;
-
-                pollProgress();
-
-              }}
-
-            }}).catch(() => {{
-
-              workflowWasBusy = false;
-
-              if (progressTimer) window.clearTimeout(progressTimer);
-
-              button.disabled = false;
-
-              button.textContent = form.dataset.stage === 'enrich' ? 'Enrich records' : 'Start web automation';
-
-            }});
-
-          }});
-
-        }});
-
-        if (workflowProgress) pollProgress();
-
-
-
-        async function pollLoginStatus() {{
-
-          try {{
-
-            const response = await fetch('/api/session-status', {{cache:'no-store'}});
-
-            if (!response.ok) throw new Error('Session status request failed');
-
-            const data = await response.json();
-
-            if (loginStatus) {{
-
-              loginStatus.textContent = data.status;
-
-              loginStatus.title = data.detail || data.status;
-
-              ['waiting', 'logged-in', 'ready', 'working', 'running', 'failed'].forEach(name => {{
-
-                loginStatus.classList.remove(name);
-
-              }});
-
-              loginStatus.classList.add(data.tone || (data.logged_in ? 'logged-in' : 'waiting'));
-
-            }}
-
-          }} catch (_error) {{
-
-            if (loginStatus) {{
-
-              loginStatus.textContent = 'Waiting for Login';
-
-              ['logged-in', 'ready', 'working', 'running', 'failed'].forEach(name => {{
-
-                loginStatus.classList.remove(name);
-
-              }});
-
-              loginStatus.classList.add('waiting');
-
-            }}
-
-          }} finally {{
-
-            window.setTimeout(pollLoginStatus, 2000);
-
-          }}
-
-        }}
-
-        document.addEventListener('click', async (event) => {{
-
-          const button = event.target.closest('.ai-resolve-btn');
-
-          if (!button || button.disabled) return;
-
-
-
-          const personId = button.dataset.personId;
-
-          const runId = button.dataset.runId;
-
-          const form = button.closest('form');
-
-          const input = form ? form.querySelector('input[name="company_name"]') : null;
-
-          const statusEl = form ? form.querySelector('.ai-status-msg') : null;
-
-
-
-          const originalContent = button.innerHTML;
-
-          button.disabled = true;
-
-          button.classList.add('loading');
-
-          button.innerHTML = '<span>✨ Searching…</span>';
-
-          if (statusEl) {{
-
-            statusEl.style.display = 'block';
-
-            statusEl.className = 'ai-status-msg';
-
-            statusEl.textContent = 'Searching web via LinkedIn profile…';
-
-          }}
-
-
-
-          try {{
-
-            const formData = new URLSearchParams();
-
-            if (runId) formData.append('run_id', runId);
-
-            formData.append('auto_approve', 'false');
-
-
-
-            const response = await fetch(`/api/people/${{personId}}/ai-resolve-company`, {{
-
-              method: 'POST',
-
-              headers: {{ 'Content-Type': 'application/x-www-form-urlencoded' }},
-
-              body: formData.toString(),
-
-            }});
-
-
-
-            const data = await response.json();
-
-            if (!response.ok || !data.success) {{
-
-              throw new Error(data.error || 'Could not resolve company.');
-
-            }}
-
-
-
-            if (input) {{
-
-              input.value = data.company_name;
-
-              input.classList.add('ai-glow');
-
-            }}
-
-
-
-            if (statusEl) {{
-
-              statusEl.className = 'ai-status-msg success';
-
-              statusEl.textContent = `✨ Suggested: ${{data.company_name}}. Submit the form to confirm and review it.`;
-
-            }}
-
-
-
-            button.disabled = false;
-
-            button.classList.remove('loading');
-
-            button.innerHTML = originalContent;
-
-
-
-          }} catch (err) {{
-
-            button.disabled = false;
-
-            button.classList.remove('loading');
-
-            button.innerHTML = originalContent;
-
-            if (statusEl) {{
-
-              statusEl.className = 'ai-status-msg error';
-
-              statusEl.textContent = err.message || 'AI web search failed. Please enter manually.';
-
-            }}
-
-          }}
-
-        }});
-
-
-
-        pollLoginStatus();
-
-      </script>
-
-    </body></html>"""
 
 
 
@@ -3403,11 +1419,6 @@ _REDESIGN_STYLES = r"""
   h2 { margin-bottom:6px; font-size:1.35rem; line-height:1.3; letter-spacing:-.025em; }
   h3 { margin-bottom:6px; font-size:1rem; }
   .page-header p,.section-copy { margin-bottom:0; color:var(--muted); }
-  .session-status { display:inline-flex; align-items:center; gap:8px; min-height:36px; padding:7px 12px; border:1px solid var(--border); border-radius:999px; background:var(--surface); color:var(--muted); font-size:.8125rem; font-weight:600; white-space:nowrap; }
-  .session-status::before { content:""; width:7px; height:7px; border-radius:50%; background:#f59e0b; }
-  .session-status.logged-in::before,.session-status.ready::before { background:#22c55e; }
-  .session-status.working::before,.session-status.running::before { background:var(--blue); box-shadow:0 0 0 4px var(--blue-soft); }
-  .session-status.failed::before { background:#ef4444; }
   .message { margin:0 0 18px; padding:12px 16px; border:1px solid #bbf7d0; border-radius:10px; background:var(--green-soft); color:#166534; font-weight:600; }
   .message.error { border-color:#fecaca; background:#fef2f2; color:var(--red); }
   .upload-card { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:24px; align-items:center; padding:26px; border:1px solid var(--border); border-radius:14px; background:var(--surface); box-shadow:var(--shadow); }
@@ -3600,8 +1611,6 @@ _REDESIGN_STYLES = r"""
     .app-shell { width:100%; padding:18px 12px 40px; }
     .page-header { align-items:flex-start; }
     .page-header p { font-size:.875rem; }
-    .session-status { min-width:36px; width:36px; padding:0; overflow:hidden; color:transparent; }
-    .session-status::before { flex:0 0 auto; }
     .overview-stats { grid-template-columns:1fr 1fr; gap:9px; }
     .metric-card { min-height:88px; padding:15px; }
     .metric-value { font-size:1.55rem; }
@@ -3621,7 +1630,6 @@ _REDESIGN_STYLES = r"""
 
 _REDESIGN_SCRIPT = r"""
   const workflowProgress = document.getElementById('workflow-progress');
-  const loginStatus = document.getElementById('login-status');
   let progressTimer = null;
   let workflowWasBusy = workflowProgress?.dataset.busy === 'true';
 
@@ -3707,9 +1715,9 @@ _REDESIGN_SCRIPT = r"""
   });
 
   function applyProgress(data) {
-    const value = data.run_status === 'enriching' ? data.processed : data.automated;
-    const total = data.run_status === 'enriching' ? data.target : data.automation_target;
-    const percent = data.run_status === 'enriching' ? data.enrichment_percent : data.automation_percent;
+    const value = data.processed;
+    const total = data.target;
+    const percent = data.enrichment_percent;
     setText('[data-live-count]', `${value} of ${total || data.total} completed`);
     const progress = document.querySelector('[data-progress="active"]');
     if (progress) {
@@ -3757,21 +1765,6 @@ _REDESIGN_SCRIPT = r"""
       }
     });
   });
-
-  async function pollLoginStatus() {
-    try {
-      const response = await fetch('/api/session-status', {cache:'no-store'});
-      if (!response.ok) throw new Error('Session request failed');
-      const data = await response.json();
-      if (loginStatus) {
-        loginStatus.textContent = data.status;
-        loginStatus.title = data.detail || data.status;
-        loginStatus.className = `session-status ${data.tone || (data.logged_in ? 'logged-in' : 'waiting')}`;
-      }
-    } catch (_error) {
-      if (loginStatus) { loginStatus.textContent = 'Waiting for Login'; loginStatus.className = 'session-status waiting'; }
-    } finally { window.setTimeout(pollLoginStatus, 2500); }
-  }
 
   const searchInput = document.querySelector('[data-table-search]');
   const reviewFilter = document.querySelector('[data-review-filter]');
@@ -3991,15 +1984,12 @@ _REDESIGN_SCRIPT = r"""
   });
 
   if (workflowWasBusy) pollProgress();
-  pollLoginStatus();
 """
 
 
 def _page(request: Request, selected_run: int | None = None) -> str:
     """Render the simplified, Stitch-guided customer verification experience."""
 
-    login_snapshot = LOGIN_MONITOR.snapshot
-    login_tone = login_snapshot.tone or ("logged-in" if login_snapshot.logged_in else "waiting")
     summaries = DATABASE.summary()
     if selected_run is None and summaries:
         selected_run = int(summaries[0]["id"])
@@ -4027,26 +2017,20 @@ def _page(request: Request, selected_run: int | None = None) -> str:
     non_customer_count = sum(str(row.get("servicenow_customer") or "").casefold() == "no" for row in rows)
     partner_count = sum("partner" in relationship.casefold() for relationship in relationships)
     opportunity_count = sum(_relationship_tone(relationship) == "positive" for relationship in relationships)
-    enriched_count, automation_count, approved_count = _workflow_counts(rows)
+    enriched_count, approved_count = _workflow_counts(rows)
     processed_count = _enrichment_processed_count(rows)
     enrichment_target = approved_count or len(rows)
     enrichment_complete = approved_count > 0 and processed_count >= approved_count
-    automation_target = enriched_count
-    automation_complete = automation_target > 0 and automation_count >= automation_target
-    busy = bool(run and run["status"] in {"enriching", "collecting"})
+    busy = bool(run and run["status"] in {"enriching"})
 
     if not run:
         current_stage = "upload"
-    elif run["status"] == "enriching" or not enrichment_complete:
+    elif run["status"] == "enriching" or not enrichment_complete or request.query_params.get("view") == "review":
         current_stage = "review"
-    elif run["status"] == "collecting":
-        current_stage = "verify"
-    elif automation_complete:
-        current_stage = "results"
     else:
-        current_stage = "verify"
+        current_stage = "results"
 
-    stage_order = {"upload": 0, "review": 1, "verify": 2, "results": 3}
+    stage_order = {"upload": 0, "review": 1, "results": 2}
     current_index = stage_order[current_stage]
 
     def step_state(index: int) -> str:
@@ -4084,8 +2068,7 @@ def _page(request: Request, selected_run: int | None = None) -> str:
       <nav class="stepper" aria-label="Verification progress">
         <div class="upload-step {step_state(0)}"><span class="step-dot">{'✓' if current_index > 0 else '1'}</span><span class="step-label">Upload</span></div>
         <div class="workflow-step {step_state(1)}"><span class="step-dot">{'✓' if current_index > 1 else '2'}</span><span class="step-label">Review companies</span></div>
-        <div class="workflow-step {step_state(2)}"><span class="step-dot">{'✓' if current_index > 2 else '3'}</span><span class="step-label">Verify customers</span></div>
-        <div class="workflow-step {step_state(3)}"><span class="step-dot">4</span><span class="step-label">Results</span></div>
+        <div class="workflow-step {step_state(2)}"><span class="step-dot">3</span><span class="step-label">Results</span></div>
       </nav>"""
 
     review_notice = ""
@@ -4128,29 +2111,14 @@ def _page(request: Request, selected_run: int | None = None) -> str:
             {_review_companies_table(rows)}
             <footer class="surface-footer"><span>Showing {len(rows)} contacts</span><form class="async-stage-form" data-stage="enrich" method="post" action="/runs/{selected_run}/enrich"><button class="primary">Review Companies</button></form></footer>
           </section>"""
-    elif current_stage == "verify" and busy:
-        percent = min(100, round(100 * automation_count / automation_target)) if automation_target else 0
-        main_surface = f"""
-          <section class="work-surface" id="workflow-progress" data-run-id="{selected_run}" data-busy="true">
-            <div class="progress-view"><div class="progress-icon"><span class="spinner"></span></div><h2>Verifying customers…</h2><p>Checking which companies are verified ServiceNow customers.</p><div class="progress-line stage-progress" role="progressbar" aria-label="Customer verification progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{percent}" data-progress="active"><span style="width:{percent}%"></span></div><div class="progress-count" data-live-count>{automation_count} of {automation_target} completed</div></div>
-          </section>"""
-    elif current_stage == "verify":
-        unresolved = sum(str(row.get("resolution_status") or "") not in TRUSTED_COMPANY_STATUSES for row in rows)
-        main_surface = f"""
-          <section class="work-surface">
-            <header class="surface-header"><div><h2>Ready to verify {enriched_count} companies</h2><p>Check which companies are verified ServiceNow customers.</p></div><div class="surface-actions"><form method="post" action="/runs/{selected_run}/launch-browser"><button class="primary">Verify Customers</button></form></div></header>
-            <div class="table-tools"><label class="search-wrap"><span class="sr-only">Search contacts or companies</span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="m16 16 4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><input class="search-input" data-table-search placeholder="Search contacts or companies…"></label>{f'<button type="button" class="filter-button" data-review-filter aria-pressed="false">{unresolved} need review</button>' if unresolved else '<span></span>'}</div>
-            {_review_companies_table(rows)}
-            <footer class="surface-footer"><span>{enriched_count} companies ready to verify</span></footer>
-          </section>"""
     else:
         main_surface = f"""
           <section class="work-surface">
-            <div class="result-intro"><span class="complete-icon" aria-hidden="true">✓</span><div><h2>Verification complete</h2><p>Your results are ready to review and share.</p></div></div>
-            <header class="surface-header"><div><h2>Results</h2><p>Customer, partner, and opportunity status for every contact.</p></div><div class="surface-actions"><a class="button primary" href="/reports.csv?run_id={selected_run}">Download CSV</a></div></header>
+            <div class="result-intro"><span class="complete-icon" aria-hidden="true">✓</span><div><h2>Company enrichment complete</h2><p>Your results are ready to review and share.</p></div></div>
+            <header class="surface-header"><div><h2>Results</h2><p>Customer, partner, and opportunity status for every contact.</p></div><div class="surface-actions"><a class="button primary" href="/reports.csv?run_id={selected_run}">Download CSV</a><a class="button" href="/?run_id={selected_run}&amp;view=review">Review companies</a></div></header>
             <div class="table-tools"><label class="search-wrap"><span class="sr-only">Search results</span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="m16 16 4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><input class="search-input" data-table-search placeholder="Search results…"></label><div class="result-filter-actions"><button type="button" class="filter-button" data-customer-filter="yes" aria-pressed="false">Customer: Yes ({verified_count})</button><button type="button" class="filter-button" data-customer-filter="no" aria-pressed="false">Customer: No ({non_customer_count})</button><div class="bulk-research-controls" data-bulk-research-controls hidden><label class="bulk-select-label"><input type="checkbox" data-bulk-select-all> Select all</label><button type="button" data-bulk-deep-research disabled>Deep Research selected (0)</button></div></div></div>
             {_simplified_results_table(rows)}
-            <footer class="surface-footer"><span>{len(rows)} contacts verified</span><a class="button primary" href="/reports.csv?run_id={selected_run}">Download CSV</a></footer>
+            <footer class="surface-footer"><span>{len(rows)} contacts</span><a class="button primary" href="/reports.csv?run_id={selected_run}">Download CSV</a></footer>
           </section>"""
 
     run_log = _escape(run.get("collection_log")) if run and run.get("collection_log") else ""
@@ -4186,9 +2154,7 @@ def _page(request: Request, selected_run: int | None = None) -> str:
       <details class="advanced">
         <summary>Advanced options and logs</summary>
         <div class="advanced-grid">
-          <p><strong>Verification service</strong><br><span id="advanced-login-copy">{_escape(login_snapshot.detail or login_snapshot.status)}</span></p>
           <div class="advanced-actions">
-            {f'<form method="post" action="/runs/{selected_run}/collect"><button>Retry verification</button></form>' if run and enriched_count and not busy else ''}
             <form method="post" action="/database/clear" onsubmit="return confirm('Delete every local customer list and result? This cannot be undone.');"><button class="danger">Clear saved data</button></form>
           </div>
           {f'<details class="run-log"><summary>View activity details</summary><pre>{run_log}</pre></details>' if run_log else ''}
@@ -4204,14 +2170,13 @@ def _page(request: Request, selected_run: int | None = None) -> str:
       <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;750&display=swap" rel="stylesheet">
       <style>{_REDESIGN_STYLES}</style>
     </head><body><main class="app-shell">
-      <header class="page-header"><div class="brand-lockup"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="m6.5 12.2 3.5 3.5 7.7-8" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></span><div><h1>Customer Verification</h1><p>Verify your customer list and discover qualified accounts.</p></div></div><span id="login-status" class="session-status {login_tone}" title="{_escape(login_snapshot.detail)}">{_escape(login_snapshot.status)}</span></header>
+      <header class="page-header"><div class="brand-lockup"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="m6.5 12.2 3.5 3.5 7.7-8" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></span><div><h1>Customer Verification</h1><p>Verify your customer list and discover qualified accounts.</p></div></div></header>
       {_message(request)}
       {file_summary}
       {metrics}
       {stepper}
       {main_surface}
       {advanced}
-      <div class="sr-only legacy-contract" aria-hidden="true"><button class="tab-button active" id="tab-enriched">Enriched records</button><button id="tab-automation">Web automation</button><button id="tab-final">Final table</button><form class="async-stage-form"><div class="stage-progress"></div></form><span>Companies approved</span></div>
       <dialog class="usage-dialog" data-usage-dialog>
         <div class="usage-dialog-header"><div><h3 data-usage-title>Record AI usage</h3><p>Token, latency, and cost details for this record.</p></div><button type="button" class="usage-dialog-close" data-usage-close aria-label="Close">×</button></div>
         <div data-usage-content><p class="muted">Loading usage…</p></div>
@@ -4826,68 +2791,6 @@ def start_deep_research(
     )
 
 
-@app.post("/runs/{run_id}/launch-browser")
-
-def open_browser(run_id: int, background_tasks: BackgroundTasks) -> RedirectResponse:
-
-    run = DATABASE.run(run_id)
-
-    if not run:
-
-        raise HTTPException(status_code=404, detail="Run not found")
-
-    if run["status"] in {"enriching", "collecting"}:
-
-        return RedirectResponse(
-
-            url=f"/?run_id={run_id}&message=This+run+is+already+busy", status_code=303
-
-        )
-
-    ready_rows = any(
-
-        str(row.get("check_status") or "").casefold() in ENRICHED_CHECK_STATUSES
-
-        for row in DATABASE.report_rows(run_id)
-
-    )
-
-    if not ready_rows:
-
-        return RedirectResponse(
-
-            url=f"/?run_id={run_id}&kind=error&message=Click+Enrich+records+first",
-
-            status_code=303,
-
-        )
-
-    try:
-
-        launch_chrome()
-
-        DATABASE.update_run(run_id, status="collecting")
-
-        background_tasks.add_task(run_collection, DATABASE, run_id, LOGIN_MONITOR)
-
-        message, kind = (
-
-            "Chrome+opened.+Log+in+and+automation+will+start+automatically.",
-
-            "success",
-
-        )
-
-    except FileNotFoundError as exc:
-
-        message, kind = str(exc).replace(" ", "+"), "error"
-
-    return RedirectResponse(url=f"/?run_id={run_id}&kind={kind}&message={message}", status_code=303)
-
-
-
-
-
 @app.post("/runs/{run_id}/enrich")
 
 def enrich(run_id: int, background_tasks: BackgroundTasks) -> RedirectResponse:
@@ -4898,7 +2801,7 @@ def enrich(run_id: int, background_tasks: BackgroundTasks) -> RedirectResponse:
 
         raise HTTPException(status_code=404, detail="Run not found")
 
-    if run["status"] in {"enriching", "collecting"}:
+    if run["status"] in {"enriching"}:
 
         return RedirectResponse(
 
@@ -4916,72 +2819,11 @@ def enrich(run_id: int, background_tasks: BackgroundTasks) -> RedirectResponse:
 
 
 
-@app.post("/runs/{run_id}/collect")
-
-def collect(run_id: int, background_tasks: BackgroundTasks) -> RedirectResponse:
-
-    run = DATABASE.run(run_id)
-
-    if not run:
-
-        raise HTTPException(status_code=404, detail="Run not found")
-
-    if run["status"] in {"enriching", "collecting"}:
-
-        return RedirectResponse(
-
-            url=f"/?run_id={run_id}&message=This+run+is+already+busy", status_code=303
-
-        )
-
-    ready_rows = any(
-
-        str(row.get("check_status") or "").casefold() in ENRICHED_CHECK_STATUSES
-
-        for row in DATABASE.report_rows(run_id)
-
-    )
-
-    if not ready_rows:
-
-        return RedirectResponse(
-
-            url=f"/?run_id={run_id}&kind=error&message=Click+Enrich+records+first",
-
-            status_code=303,
-
-        )
-
-    DATABASE.update_run(run_id, status="collecting")
-
-    background_tasks.add_task(run_collection, DATABASE, run_id, LOGIN_MONITOR)
-
-    return RedirectResponse(url=f"/?run_id={run_id}&message=Web+automation+started", status_code=303)
-
-
-
-
-
-
 @app.get("/api/reports")
 
 def reports_api(run_id: int | None = None) -> list[dict[str, Any]]:
 
     return DATABASE.report_rows(run_id)
-
-
-
-
-
-@app.get("/api/session-status")
-
-def session_status() -> dict[str, Any]:
-
-    """Return the live login state for the Chrome session used by automation."""
-
-
-
-    return LOGIN_MONITOR.snapshot.as_dict()
 
 
 
@@ -5042,7 +2884,6 @@ def run_workspace(run_id: int) -> dict[str, str]:
 
         "enriched": _enrichment_table(rows),
 
-        "automation": _automation_table(rows),
 
         "final": _final_results_table(rows),
 

@@ -31,17 +31,6 @@ class ApolloCompany(BaseModel):
     match_score: int = Field(ge=0, le=100)
 
 
-class SearchResult(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    customer: str
-    matched_name: str = ""
-    match_score: int = Field(default=0, ge=0, le=100)
-    status: CheckStatus
-    error_message: str = ""
-    returned_names: tuple[str, ...] = ()
-
-
 class CompanyRecord(BaseModel):
     """The normalized subset of a CSV row used by the application."""
 

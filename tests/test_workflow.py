@@ -10,7 +10,6 @@ from workflow.database import WorkflowDatabase
 from workflow.person_company import PersonCompanyResolver
 from workflow.service import (
     _pipeline_process,
-    build_automation_checkpoint,
     build_pipeline_csv,
     parse_people_csv,
     resolve_people,
@@ -406,48 +405,6 @@ def test_pipeline_process_calls_progress_while_the_stage_is_running(
     assert result.returncode == 0
     assert result.stdout == "stage output"
     assert progress_calls == ["sync", "sync"]
-
-
-def test_automation_checkpoint_rebuilds_all_ready_rows_after_incremental_enrichment(
-    tmp_path: Path, monkeypatch
-) -> None:
-    database = WorkflowDatabase(tmp_path / "workflow.db")
-    database.initialize()
-    run_id = database.create_run(
-        "people.csv",
-        [
-            {"person_name": "Done", "linkedin_url": "https://linkedin.com/in/done"},
-            {"person_name": "Ready", "linkedin_url": "https://linkedin.com/in/ready"},
-            {"person_name": "Failed", "linkedin_url": "https://linkedin.com/in/failed"},
-        ],
-    )
-    people = database.people_for_run(run_id)
-    for person, company in zip(people, ("Done Corp", "Ready Corp", "Failed Corp"), strict=True):
-        database.update_person_resolution(
-            person["id"], company_name=company, status="manual_verified"
-        )
-    database.upsert_check(
-        people[0]["id"], run_id,
-        {"company_name": "Done Corp", "check_status": "completed", "country_code": "US"},
-    )
-    database.upsert_check(
-        people[1]["id"], run_id,
-        {"company_name": "Ready Corp", "check_status": "apollo_success", "country_code": "GB"},
-    )
-    database.upsert_check(
-        people[2]["id"], run_id,
-        {"company_name": "Failed Corp", "check_status": "apollo_failed", "country_code": ""},
-    )
-    monkeypatch.setattr("workflow.service.RUNS_DIR", tmp_path / "runs")
-
-    input_path, output_path, count = build_automation_checkpoint(database, run_id)
-
-    with output_path.open(newline="", encoding="utf-8") as file:
-        rows = list(csv.DictReader(file))
-    assert count == 2
-    assert [row["company_name"] for row in rows] == ["Done Corp", "Ready Corp"]
-    assert [row["check_status"] for row in rows] == ["completed", "apollo_success"]
-    assert input_path.exists()
 
 
 def test_csv_headline_does_not_override_structurally_verified_apollo_company() -> None:

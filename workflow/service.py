@@ -7,16 +7,12 @@ import re
 import subprocess
 import sys
 import time
-import asyncio
 from io import StringIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from browser.errors import PreparationError
-from browser.session_monitor import LoginSessionMonitor
 from clients.apollo import ApolloClient
 from config import PROJECT_ROOT, Settings, load_settings
-from services.csv_service import CSVService
 from workflow.database import WorkflowDatabase, now
 from workflow.person_company import PersonCompanyResolver
 
@@ -153,7 +149,7 @@ def build_pipeline_csv(database: WorkflowDatabase, run_id: int, settings: Settin
     output_path = run_dir / "companies_checked.csv"
     # CSVService resumes from an existing output file. Remove the checkpoint
     # only when there is actual work to run; a no-op Enrich click must not
-    # discard the last automation-ready checkpoint.
+    # discard the last enrichment checkpoint.
     if resolved:
         output_path.unlink(missing_ok=True)
     fields = [
@@ -178,71 +174,6 @@ def build_pipeline_csv(database: WorkflowDatabase, run_id: int, settings: Settin
                 }
             )
     return input_path, output_path, len(resolved)
-
-
-def build_automation_checkpoint(
-    database: WorkflowDatabase, run_id: int
-) -> tuple[Path, Path, int]:
-    """Rebuild the browser queue from every database row that has usable country data."""
-
-    rows = [
-        row
-        for row in database.report_rows(run_id)
-        if str(row.get("country_code") or "").strip()
-        and str(row.get("check_status") or "").casefold()
-        in {"apollo_success", "ai_success", "searching", "completed", "manual_review", "error"}
-    ]
-    run_dir = RUNS_DIR / str(run_id)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    input_path = run_dir / "companies.csv"
-    output_path = run_dir / "companies_checked.csv"
-    input_fields = [
-        "company_name", "linkedin_url", "source_person_id", "person_name",
-        "source_person_linkedin_url", "headline", "domain",
-    ]
-    output_fields = [
-        "company_name", "linkedin_url", "headquarters", "country", "country_code",
-        "apollo_company_name", "servicenow_customer", "servicenow_matched_name",
-        "servicenow_screenshot", "match_score", "check_status", "error_message",
-        "checked_at", "domain", "country_override", "source_person_id", "person_name",
-        "source_person_linkedin_url", "headline",
-    ]
-    with input_path.open("w", newline="", encoding="utf-8") as input_file, output_path.open(
-        "w", newline="", encoding="utf-8"
-    ) as output_file:
-        input_writer = csv.DictWriter(input_file, fieldnames=input_fields)
-        output_writer = csv.DictWriter(output_file, fieldnames=output_fields)
-        input_writer.writeheader()
-        output_writer.writeheader()
-        for row in rows:
-            identity = {
-                "company_name": row.get("company_name") or "",
-                "linkedin_url": row.get("company_linkedin_url") or "",
-                "source_person_id": row.get("person_id") or "",
-                "person_name": row.get("person_name") or "",
-                "source_person_linkedin_url": row.get("linkedin_url") or "",
-                "headline": row.get("headline") or "",
-                "domain": row.get("company_domain") or "",
-            }
-            input_writer.writerow(identity)
-            output_writer.writerow(
-                {
-                    **identity,
-                    "headquarters": row.get("headquarters") or "",
-                    "country": row.get("country") or "",
-                    "country_code": row.get("country_code") or "",
-                    "apollo_company_name": row.get("apollo_company_name") or "",
-                    "servicenow_customer": row.get("servicenow_customer") or "",
-                    "servicenow_matched_name": row.get("servicenow_matched_name") or "",
-                    "servicenow_screenshot": row.get("screenshot_path") or "",
-                    "match_score": row.get("match_score") or "",
-                    "check_status": row.get("check_status") or "apollo_success",
-                    "error_message": row.get("error_message") or "",
-                    "checked_at": row.get("checked_at") or "",
-                    "country_override": "",
-                }
-            )
-    return input_path, output_path, len(rows)
 
 
 def sync_pipeline_results(database: WorkflowDatabase, run_id: int, output_path: Path) -> int:
@@ -289,8 +220,6 @@ def _pipeline_process(
     environment = os.environ.copy()
     environment["INPUT_CSV"] = str(input_path)
     environment["OUTPUT_CSV"] = str(output_path)
-    environment["DEBUG_DIR"] = str(input_path.parent / "debug")
-    environment["SAVE_SCREENSHOTS"] = "true"
     if metrics_database_path is not None and metrics_run_id is not None:
         environment["AI_METRICS_DATABASE"] = str(metrics_database_path)
         environment["AI_METRICS_RUN_ID"] = str(metrics_run_id)
@@ -324,7 +253,7 @@ def _pipeline_process(
 
 
 def run_enrichment(database: WorkflowDatabase, run_id: int) -> None:
-    """Resolve people and enrich organizations without starting browser automation."""
+    """Resolve people and enrich organizations and save the results."""
 
     try:
         settings = load_settings()
@@ -389,151 +318,3 @@ def run_enrichment(database: WorkflowDatabase, run_id: int) -> None:
         )
     except Exception as exc:
         database.update_run(run_id, status="failed", finished_at=now(), collection_log=str(exc))
-
-
-def run_collection(
-    database: WorkflowDatabase, run_id: int, login_monitor: LoginSessionMonitor | None = None
-) -> None:
-    """Run only ServiceNow browser automation against enriched records."""
-
-    try:
-        settings = load_settings()
-        database.update_run(run_id, status="collecting", started_at=now(), collection_log="")
-        input_path, output_path, ready_count = build_automation_checkpoint(database, run_id)
-        if not ready_count:
-            database.update_run(
-                run_id,
-                status="needs_attention",
-                finished_at=now(),
-                collection_log="No enriched records found. Click Enrich records first.",
-            )
-            return
-
-        process = asyncio.run(
-            _run_collection_in_process(
-                database=database,
-                run_id=run_id,
-                settings=settings,
-                input_path=input_path,
-                output_path=output_path,
-                login_monitor=login_monitor,
-            )
-        )
-        sync_count = sync_pipeline_results(database, run_id, output_path)
-        log = process.strip()[-20_000:]
-        report_rows = database.report_rows(run_id)
-        completed_checks = sum(row["check_status"] == "completed" for row in report_rows)
-        people_count = len(report_rows)
-        resolved_count = sum(
-            bool(str(row["company_name"] or "").strip())
-            and row["resolution_status"] in TRUSTED_COMPANY_STATUSES
-            for row in report_rows
-        )
-        status = (
-            "completed"
-            if process.returncode == 0
-            and resolved_count == people_count
-            and completed_checks == resolved_count
-            else "needs_attention"
-        )
-        summary = (
-            f"Resolved {resolved_count}/{people_count}; ServiceNow completed "
-            f"{completed_checks}/{people_count}; synced {sync_count}.\n{log}"
-        )
-        database.update_run(run_id, status=status, finished_at=now(), collection_log=summary)
-        if login_monitor:
-            login_monitor.set_phase(
-                "Ready",
-                "Customer Information is still open and ready for another automation run",
-                tone="ready",
-            )
-    except PreparationError as exc:
-        detail = f"{exc.step}: {exc.detail}"
-        if login_monitor:
-            login_monitor.set_phase("Automation Failed", detail, tone="failed")
-        database.update_run(run_id, status="failed", finished_at=now(), collection_log=detail)
-    except Exception as exc:
-        if login_monitor:
-            login_monitor.set_phase("Automation Failed", str(exc), tone="failed")
-        database.update_run(run_id, status="failed", finished_at=now(), collection_log=str(exc))
-
-
-async def _run_collection_in_process(
-    *,
-    database: WorkflowDatabase,
-    run_id: int,
-    settings: Settings,
-    input_path: Path,
-    output_path: Path,
-    login_monitor: LoginSessionMonitor | None,
-) -> str:
-    from browser.preparation import prepare_existing_session
-    from main import automate_indices
-    from playwright.async_api import async_playwright
-
-    csv_service = CSVService(input_path, output_path)
-    indices = csv_service.selected_indices(force=False, company=None, limit=None)
-    if not indices:
-        raise RuntimeError("No automation-ready rows were found in the checkpoint.")
-
-    def publish_status(status: str, detail: str, tone: str) -> None:
-        if login_monitor:
-            login_monitor.set_phase(status, detail, tone=tone)
-
-    progress_callback = lambda: sync_pipeline_results(database, run_id, output_path)
-    progress_callback()
-
-    async with async_playwright() as playwright:
-        connection = await prepare_existing_session(
-            playwright,
-            settings.chrome_cdp_url,
-            status_callback=publish_status,
-            # The portal is an Angular application and can finish rendering its
-            # authenticated controls well after the initial document load.
-            action_timeout_seconds=max(settings.search_timeout_seconds, 60.0),
-        )
-        publish_status(
-            "Automation Running",
-            "The existing scraping workflow is processing the prepared Customer Information page",
-            "running",
-        )
-        return_code = await automate_indices(
-            csv_service,
-            indices,
-            settings,
-            playwright=playwright,
-            connected=connection,
-            progress_callback=progress_callback,
-        )
-    progress_callback()
-    if return_code != 0:
-        raise RuntimeError(
-            f"Automation Failed: the existing scraping workflow exited with code {return_code}."
-        )
-    return "Automation completed successfully in the existing Chrome session."
-
-
-def chrome_executable() -> Path:
-    candidates = [
-        Path(os.environ.get("ProgramFiles", "")) / "Google/Chrome/Application/chrome.exe",
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
-        Path(os.environ.get("ProgramFiles(x86)", "")) / "Google/Chrome/Application/chrome.exe",
-    ]
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    raise FileNotFoundError("Google Chrome was not found in a standard installation path")
-
-
-def launch_chrome() -> None:
-    subprocess.Popen(
-        [
-            str(chrome_executable()),
-            "--remote-debugging-port=9222",
-            "--user-data-dir=C:\\playwright-servicenow-profile",
-            "https://partnerportal.servicenow.com/partnerhome?id=deployment_registration&spa=1",
-        ],
-        cwd=PROJECT_ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
