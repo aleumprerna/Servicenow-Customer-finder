@@ -18,31 +18,6 @@ SQLite is used by default because it requires no server or credentials. It is a 
 
 Your Apollo API key needs access to both **People Match** (to resolve the employer from the person's LinkedIn profile) and **Organization Enrichment/Search** (to obtain the organization's headquarters country).
 
-### Microsoft sign-in sample
-
-Microsoft authentication is available as the reusable `microsoft_identity` package.
-See [the library guide](microsoft_identity/README.md) for installation, direct Python
-imports, configurable storage, and attaching the existing pages to another FastAPI app.
-The current project's `microsoft_auth.py` is a compatibility adapter.
-
-1. In the Microsoft Entra admin center, open **App registrations**, create a registration, and record its Application (client) ID and Directory (tenant) ID.
-2. Under **Authentication**, add the **Web** redirect URI `http://localhost:8000/auth/callback`.
-3. Under **Certificates & secrets**, create a client secret for local development. Copy its **Value** immediately.
-4. Under **API permissions**, add the delegated Microsoft Graph permissions `User.Read` and `Mail.Send`. Grant admin consent if your tenant requires it.
-5. Add the following to `.env` and use long, stable random values for the two secrets:
-
-```dotenv
-MICROSOFT_CLIENT_ID=your-application-client-id
-MICROSOFT_CLIENT_SECRET=your-client-secret-value
-MICROSOFT_TENANT_ID=your-directory-tenant-id
-MICROSOFT_REDIRECT_URI=http://localhost:8000/auth/callback
-MICROSOFT_TOKEN_KEY=replace-with-a-long-random-value
-SESSION_SECRET=replace-with-a-long-random-value
-SESSION_HTTPS_ONLY=false
-```
-
-Start the server, then open [http://localhost:8000/login](http://localhost:8000/login). Connect each sender separately, then open `/email` to create a template and send. For production, use an HTTPS redirect URI, set `SESSION_HTTPS_ONLY=true`, and prefer a certificate or federated credential over a client secret. Keep `MICROSOFT_TOKEN_KEY` stable; changing it requires reconnecting saved accounts.
-
 ### Start the UI
 
 Install the updated requirements once, then start the server:
@@ -81,7 +56,6 @@ servicenow-customer-checker/
 ├── companies.csv
 ├── clients/
 │   └── apollo.py
-├── microsoft_identity/    # Reusable Microsoft authentication library
 ├── workflow/
 ├── services/
 │   ├── company_matcher.py
@@ -165,7 +139,7 @@ LLM_WEB_SEARCH_COST_PER_CALL=
 Update these values when changing models or when provider pricing changes. The telemetry ledger
 stores metadata and usage totals only; it does not store prompts, model responses, or API keys.
 
-Do not commit `.env`. Keep API keys and Microsoft credentials private.
+Do not commit `.env`. Keep API keys private.
 
 Matching thresholds default to:
 

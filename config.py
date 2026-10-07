@@ -24,7 +24,6 @@ class Settings(BaseModel):
     apollo_match_threshold: int = Field(default=80, ge=1, le=100)
     apollo_timeout_seconds: float = Field(default=20.0, gt=0)
     apollo_max_retries: int = Field(default=3, ge=1, le=8)
-    app_base_url: str = "http://localhost:8000"
     llm_provider: str = "openai"
     kie_api_key: str | None = None
     kie_base_url: str = "https://api.kie.ai/codex/v1"
@@ -124,7 +123,6 @@ def load_settings(env_file: Path | None = None) -> Settings:
         "apollo_match_threshold": os.getenv("APOLLO_MATCH_THRESHOLD", "80"),
         "apollo_timeout_seconds": os.getenv("APOLLO_TIMEOUT_SECONDS", "20"),
         "apollo_max_retries": os.getenv("APOLLO_MAX_RETRIES", "3"),
-        "app_base_url": dynamic_value("APP_BASE_URL", "http://localhost:8000"),
         "llm_provider": llm_provider,
         "kie_api_key": dynamic_value("KIE_API_KEY") or _optional("KIE_API_KEY"),
         "kie_base_url": dynamic_value("KIE_BASE_URL", "https://api.kie.ai/codex/v1"),

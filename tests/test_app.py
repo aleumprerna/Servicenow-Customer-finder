@@ -269,9 +269,8 @@ def test_progress_payload_reports_live_stage_counts(monkeypatch) -> None:
     assert "automation_percent" not in progress
 
 
-def test_app_startup_and_results_work_without_browser_routes(tmp_path, monkeypatch):
+def test_app_startup_and_results_work_without_browser_or_auth_routes(tmp_path, monkeypatch):
     from workflow.database import WorkflowDatabase
-    import microsoft_auth
 
     database = WorkflowDatabase(tmp_path / "workflow.db")
     database.initialize()
@@ -284,14 +283,30 @@ def test_app_startup_and_results_work_without_browser_routes(tmp_path, monkeypat
     database.upsert_check(person_id, run_id, {"company_name": "Example Company", "check_status": "apollo_success"})
     database.update_run(run_id, status="enriched")
     monkeypatch.setattr(dashboard, "DATABASE", database)
-    monkeypatch.setattr(microsoft_auth.STORE, "path", tmp_path / "auth.db")
 
     with TestClient(dashboard.app) as client:
         page = client.get(f"/?run_id={run_id}")
         assert page.status_code == 200
         assert "Company enrichment complete" in page.text
         assert "Deep Research" in page.text
-        assert client.get("/login").status_code == 200
+        for method, path in (
+            ("GET", "/login"),
+            ("GET", "/logout"),
+            ("GET", "/auth/microsoft"),
+            ("GET", "/auth/callback"),
+            ("POST", "/auth/callback"),
+            ("POST", "/accounts/1/remove"),
+            ("GET", "/email"),
+            ("POST", "/email/templates"),
+            ("POST", "/email/send"),
+            ("POST", "/api/microsoft/account-data"),
+            ("GET", "/api/microsoft/account-data/person@example.com"),
+        ):
+            assert client.request(method, path).status_code == 404
+        assert not any(
+            middleware.cls.__name__ == "SessionMiddleware"
+            for middleware in dashboard.app.user_middleware
+        )
         assert client.get(f"/reports.csv?run_id={run_id}").status_code == 200
         assert client.post(f"/runs/{run_id}/launch-browser").status_code == 404
         assert client.post(f"/runs/{run_id}/collect").status_code == 404
