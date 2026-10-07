@@ -34,7 +34,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from utils.filenames import safe_filename
 
-from browser.session_monitor import LoginSessionMonitor
+from playwright_service.browser.session_monitor import LoginSessionMonitor
 
 from config import PROJECT_ROOT, load_settings
 

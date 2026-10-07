@@ -1,5 +1,10 @@
 # ServiceNow Customer Checker
 
+The Playwright automation is extracted into the standalone [playwright_service](playwright_service/README.md)
+module. Run `python -m playwright_service --port 8001` and send company names and headquarters
+to `POST /api/check-companies` to receive completed results as JSON. See the module README
+for independent installation, Chrome/login setup, endpoints, and sample request bodies.
+
 For a complete step-by-step explanation of every workflow source, evidence rule, URL safeguard, module signal, and confidence calculation, see [SOURCES_AND_WORKFLOW.md](SOURCES_AND_WORKFLOW.md).
 
 This application enriches companies with Apollo headquarters data, attaches Playwright to an already-open and manually authenticated Chrome session, searches the ServiceNow Customer Information form, and checkpoints every result to CSV.
@@ -309,7 +314,7 @@ ServiceNow browser automation gets one controlled retry for a temporary timeout/
 
 ## Result selectors and HTML changes
 
-The supplied form HTML did not include the actual result markup. Safe defaults are centralized in `DEFAULT_RESULT_SELECTORS` in `browser/servicenow.py`. Each selector must point to **one element per customer name**, not to the entire page or an unrelated table.
+The supplied form HTML did not include the actual result markup. Safe defaults are centralized in `DEFAULT_RESULT_SELECTORS` in `playwright_service/browser/servicenow.py`. Each selector must point to **one element per customer name**, not to the entire page or an unrelated table.
 
 If ServiceNow changes its result HTML, the program will not invent a match. It writes:
 
@@ -339,7 +344,7 @@ SERVICENOW_RESULT_SELECTORS=["[data-testid='customer-results'] [data-testid='cus
 
 6. Rerun the single-company test and confirm the log lists the exact customer names, not whole table rows with extra fields.
 
-Alternatively, update `DEFAULT_RESULT_SELECTORS` in `browser/servicenow.py`. Explicit no-result and technical-error phrases are centralized nearby in `NO_RESULTS_PATTERNS` and `TECHNICAL_ERROR_PATTERNS`.
+Alternatively, update `DEFAULT_RESULT_SELECTORS` in `playwright_service/browser/servicenow.py`. Explicit no-result and technical-error phrases are centralized nearby in `NO_RESULTS_PATTERNS` and `TECHNICAL_ERROR_PATTERNS`.
 
 ## Troubleshooting
 

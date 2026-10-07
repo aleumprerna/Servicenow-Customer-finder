@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 import main
+from playwright_service import csv_runner
 from browser.servicenow import SessionExpiredError
 from clients.apollo import ApolloNoMatchError
 from models.company import CheckStatus, SearchResult
@@ -178,9 +179,9 @@ async def test_automation_reconnects_when_servicenow_replaces_page(
     async def no_sleep(_seconds: float) -> None:
         pass
 
-    monkeypatch.setattr(main, "async_playwright", lambda: PlaywrightContext())
-    monkeypatch.setattr(main, "connect_to_servicenow", connect)
-    monkeypatch.setattr(main, "ServiceNowChecker", lambda **values: Checker(values["page"]))
+    monkeypatch.setattr(csv_runner, "async_playwright", lambda: PlaywrightContext())
+    monkeypatch.setattr(csv_runner, "connect_to_servicenow", connect)
+    monkeypatch.setattr(csv_runner, "ServiceNowChecker", lambda **values: Checker(values["page"]))
     monkeypatch.setattr(main.asyncio, "sleep", no_sleep)
     stage_settings = SimpleNamespace(
         chrome_cdp_url="http://localhost:9222",

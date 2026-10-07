@@ -1,0 +1,13 @@
+{
+  "companies": [
+    {
+      "company_name": "Adobe",
+      "headquarters": "San Jose, California, United States"
+    },
+    {
+      "company_name": "Infosys",
+      "headquarters": "Bengaluru, Karnataka",
+      "country_code": "IN"
+    }
+  ]
+}

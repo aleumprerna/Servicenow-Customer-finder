@@ -12,8 +12,9 @@ from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from browser.errors import PreparationError
-from browser.session_monitor import LoginSessionMonitor
+from playwright_service.browser.errors import PreparationError
+from playwright_service.browser.session_monitor import LoginSessionMonitor
+from playwright_service.chrome import chrome_executable, launch_chrome
 from clients.apollo import ApolloClient
 from config import PROJECT_ROOT, Settings, load_settings
 from services.csv_service import CSVService
@@ -467,9 +468,7 @@ async def _run_collection_in_process(
     output_path: Path,
     login_monitor: LoginSessionMonitor | None,
 ) -> str:
-    from browser.preparation import prepare_existing_session
-    from main import automate_indices
-    from playwright.async_api import async_playwright
+    from playwright_service.csv_runner import prepare_and_automate_indices
 
     csv_service = CSVService(input_path, output_path)
     indices = csv_service.selected_indices(force=False, company=None, limit=None)
@@ -482,58 +481,14 @@ async def _run_collection_in_process(
 
     progress_callback = lambda: sync_pipeline_results(database, run_id, output_path)
     progress_callback()
-
-    async with async_playwright() as playwright:
-        connection = await prepare_existing_session(
-            playwright,
-            settings.chrome_cdp_url,
-            status_callback=publish_status,
-            # The portal is an Angular application and can finish rendering its
-            # authenticated controls well after the initial document load.
-            action_timeout_seconds=max(settings.search_timeout_seconds, 60.0),
-        )
-        publish_status(
-            "Automation Running",
-            "The existing scraping workflow is processing the prepared Customer Information page",
-            "running",
-        )
-        return_code = await automate_indices(
-            csv_service,
-            indices,
-            settings,
-            playwright=playwright,
-            connected=connection,
-            progress_callback=progress_callback,
-        )
+    return_code = await prepare_and_automate_indices(
+        csv_service, indices, settings,
+        status_callback=publish_status,
+        progress_callback=progress_callback,
+    )
     progress_callback()
     if return_code != 0:
         raise RuntimeError(
             f"Automation Failed: the existing scraping workflow exited with code {return_code}."
         )
     return "Automation completed successfully in the existing Chrome session."
-
-
-def chrome_executable() -> Path:
-    candidates = [
-        Path(os.environ.get("ProgramFiles", "")) / "Google/Chrome/Application/chrome.exe",
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
-        Path(os.environ.get("ProgramFiles(x86)", "")) / "Google/Chrome/Application/chrome.exe",
-    ]
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    raise FileNotFoundError("Google Chrome was not found in a standard installation path")
-
-
-def launch_chrome() -> None:
-    subprocess.Popen(
-        [
-            str(chrome_executable()),
-            "--remote-debugging-port=9222",
-            "--user-data-dir=C:\\playwright-servicenow-profile",
-            "https://partnerportal.servicenow.com/partnerhome?id=deployment_registration&spa=1",
-        ],
-        cwd=PROJECT_ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )

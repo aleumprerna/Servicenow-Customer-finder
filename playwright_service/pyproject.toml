@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "servicenow-playwright-service"
+version = "1.0.0"
+description = "Standalone Playwright API for ServiceNow customer checks"
+readme = "README.md"
+requires-python = ">=3.11"
+dynamic = ["dependencies"]
+
+[project.scripts]
+servicenow-playwright = "playwright_service.__main__:main"
+
+[tool.setuptools]
+packages = ["playwright_service", "playwright_service.browser"]
+package-dir = {playwright_service = "."}
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}

@@ -1,8 +1,5 @@
-from __future__ import annotations
+"""Compatibility import; implementation lives in playwright_service."""
+import sys
+from importlib import import_module
 
-import re
-
-
-def safe_filename(value: str) -> str:
-    normalized = re.sub(r"[^a-zA-Z0-9_-]+", "_", value.strip()).strip("_").lower()
-    return (normalized or "company")[:80]
+sys.modules[__name__] = import_module("playwright_service.filenames")
